@@ -1,0 +1,31 @@
+{
+  "repository": "https://github.com/alan890104/qwen3-asr-rs",
+  "revision": "c5ef09646af6278d2ba8b8ceaf543ffb32d1a5dc",
+  "license": "MIT",
+  "files": [
+    {
+      "file": "sample1.wav",
+      "bytes": 108844,
+      "sha256": "6208727ac0b9de7aa1b2df8214f39bccb1e511298c55f4ca8d5f3c4abf8df257",
+      "text": null
+    },
+    {
+      "file": "sample1.txt",
+      "bytes": 45,
+      "sha256": "b47cc0f104b62d4c7c30bcd68fd8e67613e287dc4ad8c310ef10cbadea9c4380",
+      "text": "The quick brown fox jumps over the lazy dog.\n"
+    },
+    {
+      "file": "sample5.wav",
+      "bytes": 971244,
+      "sha256": "61f484701eaf04b50b304fc56f51d2873f75f2e1b52e51eae0e4981d0c586216",
+      "text": null
+    },
+    {
+      "file": "sample5.txt",
+      "bytes": 427,
+      "sha256": "0b28995b10b9c8fd2fe94f84f58eccff67dd9a5a2f0f42a8505727bc534f8818",
+      "text": "随着科技的不断进步，人工智能已经深入到我们日常生活的每个角落。在医疗领域，智能诊断系统能够通过分析医学影像，快速准确地识别疾病。在交通领域，自动驾驶技术正在逐步走向成熟。在教育领域，个性化学习系统能够根据每个学生的学习进度，提供量身定制的教学内容，让每个孩子都能得到最适合自己的教育。\n"
+    }
+  ]
+}

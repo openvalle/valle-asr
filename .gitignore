@@ -1,0 +1,5 @@
+/target/
+/models/
+/artifacts/
+*.part
+__pycache__/

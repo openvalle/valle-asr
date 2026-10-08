@@ -1,0 +1,59 @@
+name: macOS ASR
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RAYON_NUM_THREADS: 4
+      TOKENIZERS_PARALLELISM: 'false'
+      VALLE_ASR_TEST_CACHE: models
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-rust-1.99
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Check optional backend boundary
+        run: cargo check --locked --no-default-features --lib
+      - name: Permissive dependency licenses
+        run: python scripts/check_licenses.py
+      - name: Unit and API tests
+        run: cargo test --locked --release
+      - name: Restore pinned model cache
+        uses: actions/cache@v5
+        with:
+          path: models
+          key: qwen3-models-v1-${{ hashFiles('models.json') }}
+      - name: Download or verify model cache
+        run: cargo run --locked --release -- download --cache-dir models
+      - name: Real English, Chinese and word alignment
+        run: cargo test --locked --release --test real_models -- --ignored --nocapture
+      - name: Upload recognition results and validation receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-qwen3-results
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
