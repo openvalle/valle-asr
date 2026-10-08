@@ -103,6 +103,8 @@ releases the resident model explicitly.
 GitHub Actions caches Cargo dependencies/builds per platform and shares the
 revision-pinned model cache across platforms. Model cache keys include the
 hash of `models.json`; each restored cache is still validated before use.
+Text files use LF on every platform so Windows checkout does not change
+content-based cache keys; WAV fixtures remain binary.
 
 ## Validation
 
