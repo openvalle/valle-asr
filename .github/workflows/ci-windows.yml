@@ -44,6 +44,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: models
+          enableCrossOsArchive: true
           key: qwen3-models-v1-${{ hashFiles('models.json') }}
       - name: Download or verify model cache
         run: cargo run --locked --release -- download --cache-dir models
