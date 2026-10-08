@@ -1,6 +1,9 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::{
+    io::BufWriter,
+    path::{Path, PathBuf},
+};
 
 #[derive(Parser)]
 #[command(
@@ -105,7 +108,8 @@ fn main() -> Result<()> {
             #[cfg(feature = "qwen3")]
             {
                 use valle_asr::{
-                    AsrEngine, Audio, TimestampMode, TranscribeOptions, models::qwen3::Qwen3,
+                    AsrEngine, JsonTranscriptWriter, TimestampMode, TranscribeOptions,
+                    models::qwen3::Qwen3,
                 };
                 if !model.starts_with("qwen3-asr-") {
                     bail!("unsupported model family: {model}");
@@ -142,26 +146,39 @@ fn main() -> Result<()> {
                 };
                 let mut engine = AsrEngine::new();
                 engine.register(Qwen3::load(&model, model_dir, aligner_dir)?)?;
-                let transcript = engine.transcribe(
-                    &model,
-                    &Audio::from_wav(input)?,
-                    &TranscribeOptions {
-                        language,
-                        timestamps: if text_only {
-                            TimestampMode::None
-                        } else {
-                            TimestampMode::Word
-                        },
-                        chunk_seconds,
-                        max_new_tokens,
-                        context,
+                let options = TranscribeOptions {
+                    language,
+                    timestamps: if text_only {
+                        TimestampMode::None
+                    } else {
+                        TimestampMode::Word
                     },
-                )?;
-                let json = serde_json::to_string_pretty(&transcript)?;
+                    chunk_seconds,
+                    max_new_tokens,
+                    context,
+                };
                 if let Some(output) = output {
-                    std::fs::write(output, format!("{json}\n"))?;
+                    let parent = output
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(Path::new("."));
+                    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+                    let mut writer =
+                        JsonTranscriptWriter::new(BufWriter::new(temporary.as_file_mut()))?;
+                    let summary =
+                        engine.transcribe_file(&model, &input, &options, &mut |segment| {
+                            writer.write_segment(segment)
+                        })?;
+                    writer.finish(&summary)?;
+                    temporary.persist(&output)?;
                 } else {
-                    println!("{json}");
+                    let stdout = std::io::stdout();
+                    let mut writer = JsonTranscriptWriter::new(BufWriter::new(stdout.lock()))?;
+                    let summary =
+                        engine.transcribe_file(&model, &input, &options, &mut |segment| {
+                            writer.write_segment(segment)
+                        })?;
+                    writer.finish(&summary)?;
                 }
             }
             #[cfg(not(feature = "qwen3"))]

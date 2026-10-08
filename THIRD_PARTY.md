@@ -18,6 +18,12 @@ implemented here in Rust. Mathematical behavior follows the official model.
 
 Full upstream license texts are preserved under `third_party/`.
 
+Long-file regression tests generate sparse PCM WAV files in `tests/support/`.
+Their real speech inserts repeat the existing MIT-licensed `sample1.wav` at
+both ends of a two-hour timeline; no additional audio corpus or external
+evaluation code is included. The file decoder, streaming writer and sampling
+test helpers are newly implemented in this repository.
+
 ## Model weights
 
 `models.json` pins official Qwen model revisions and every file's size and

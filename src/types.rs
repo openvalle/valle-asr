@@ -25,6 +25,16 @@ pub struct Transcript {
     pub segments: Vec<Segment>,
 }
 
+/// Metadata returned by file transcription; segments are delivered to a sink.
+/// It deliberately contains no growing transcript text or segment vector.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TranscriptSummary {
+    pub model: String,
+    pub language: String,
+    pub duration_ms: u64,
+    pub segment_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelInfo {
     pub id: String,

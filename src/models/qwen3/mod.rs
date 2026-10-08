@@ -1,6 +1,7 @@
 //! Qwen3-ASR and its separate learned timestamp classifier, running on CPU.
 mod config;
 mod dsp;
+mod file;
 mod network;
 mod text;
 
@@ -245,6 +246,16 @@ impl AsrModel for Qwen3 {
             word_timestamps: self.aligner_dir.is_some(),
         }
     }
+
+    fn transcribe_file(
+        &mut self,
+        path: &Path,
+        options: &TranscribeOptions,
+        emit: &mut dyn FnMut(Segment) -> Result<()>,
+    ) -> Result<crate::TranscriptSummary> {
+        self.transcribe_wav(path, options, emit)
+    }
+
     fn transcribe(&mut self, audio: &Audio, options: &TranscribeOptions) -> Result<Transcript> {
         ensure!(
             (1..=30).contains(&options.chunk_seconds),

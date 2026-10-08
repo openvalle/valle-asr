@@ -8,8 +8,14 @@ mod audio;
 pub mod cache;
 mod engine;
 pub mod models;
+mod output;
+mod streaming;
 mod types;
 
 pub use audio::Audio;
 pub use engine::{AsrEngine, AsrModel};
-pub use types::{ModelInfo, Segment, TimestampMode, TranscribeOptions, Transcript, Word};
+pub use output::JsonTranscriptWriter;
+pub use streaming::{AudioChunk, WavChunks};
+pub use types::{
+    ModelInfo, Segment, TimestampMode, TranscribeOptions, Transcript, TranscriptSummary, Word,
+};

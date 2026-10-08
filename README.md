@@ -20,8 +20,9 @@ word timestamps. The first backend is **Qwen3-ASR**, paired with
 - Mono/stereo integer/float WAV input, converted to mono 16 kHz with low-pass
   resampling. Applications can pass PCM directly. Other media can be decoded
   by the consumer, including Valle's existing FFmpeg integration.
-- Long audio is split into bounded chunks. Word timestamps are predicted by a
-  separate neural alignment model and offset to the original audio timeline.
+- Complete WAV files are decoded and transcribed in bounded chunks, with
+  silence-aware boundaries. Audio and transcript RAM do not grow with duration
+  when using the file API/CLI. Word timestamps retain the original timeline.
 - Pluggable model interface: applications register models and select by ID.
   Adding a model family does not change the shared transcript schema.
 
@@ -57,10 +58,42 @@ and Korean morphological word segmentation is not implemented; those
 languages can use text-only ASR. Other ASR languages unsupported by the
 aligner return an explicit error when word timestamps are requested.
 
+## Long files and memory
+
+Submit a complete file with the same `transcribe ... --output transcript.json`
+command. There is no ASR file-duration limit. The decoder reads at most the
+current chunk plus resampling neighbors, mixes channels during reading, and
+preserves the global resampling phase across boundaries. A 30-second normalized
+16 kHz chunk contains 1,920,000 bytes of F32 PCM, regardless of file duration;
+source-rate buffers, model weights and inference tensors need additional RAM.
+Input sample rates up to 384 kHz are supported by the file decoder.
+
+Within the last three seconds of a chunk (or the last quarter of a small chunk),
+the decoder prefers a quiet interval of at least 120 ms. It does not drop or
+duplicate source samples. Continuous speech without a suitable pause still
+uses the hard chunk limit; this is not a full VAD or overlap/deduplication system.
+Exact digital-zero padding is omitted from neural inference while preserving
+its offset. Other low-volume sounds are not classified as silence.
+
+With word timestamps, ASR runs first and writes interval/text records to a
+temporary file. Its neural weights are released before the alignment pass
+re-reads the same WAV. Each neural model loads once per stage. Final segments
+are emitted during alignment; text-only mode emits them during the first pass.
+The JSON writer also spools text on disk so that the existing full `text` field
+does not require a growing RAM buffer. Temporary disk usage and processing time
+grow with duration, and temporary files are removed on success or error.
+`--output` replaces the destination only after successful completion.
+
+The current decoder supports standard RIFF WAV, whose 32-bit size fields impose
+an approximately 4 GiB container limit (about 37 hours for 16 kHz mono PCM16).
+RF64 and compressed-media file decoding are not implemented here. Consumers
+can use their own media decoding for other formats.
+
 ## Rust API
 
 ```rust,no_run
-use valle_asr::{AsrEngine, Audio, TranscribeOptions, models::qwen3::Qwen3};
+use std::{fs::File, io::BufWriter};
+use valle_asr::{AsrEngine, JsonTranscriptWriter, TranscribeOptions, models::qwen3::Qwen3};
 
 # fn main() -> anyhow::Result<()> {
 let mut engine = AsrEngine::new();
@@ -69,15 +102,22 @@ engine.register(Qwen3::load(
     "models/asr",
     Some("models/aligner".into()),
 )?)?;
-let result = engine.transcribe(
+let mut output = JsonTranscriptWriter::new(BufWriter::new(File::create("transcript.json")?))?;
+let summary = engine.transcribe_file(
     "qwen3-asr-0.6b",
-    &Audio::from_wav("speech.wav")?,
+    "speech.wav",
     &TranscribeOptions::default(),
+    &mut |segment| output.write_segment(segment),
 )?;
-println!("{}", result.text);
+output.finish(&summary)?;
 # Ok(())
 # }
 ```
+
+The existing `transcribe(&Audio, ...)` API remains available for already-loaded
+PCM and intentionally returns an in-memory `Transcript`. For long files, use
+`transcribe_file` and a sink that persists or displays segments without retaining
+them. A consumer collecting every callback into a vector will still grow RAM.
 
 Implement `AsrModel` to register another model family. `AsrEngine` dispatches
 to the selected registered instance. Backends receive the same normalized
@@ -115,6 +155,11 @@ alignment. Missing weights fail the model test.
 
 The real tests check English/Chinese character error rates, non-collapsed
 monotonic word spans inside source chunks, and offsets on a two-chunk clip.
+Every platform also runs a two-hour sparse WAV through the streaming API/JSON
+writer, continuous resampling tests, and real Qwen ASR/alignment on speech at
+both ends of a two-hour sparse WAV. The long fixture is mostly digital silence;
+it validates file handling, bounded chunks and global word offsets, not two
+hours of continuous-speech accuracy or throughput.
 Each platform uploads the output JSON and a timing/accuracy receipt. They
 validate correctness on hosted CPUs; performance and Windows hardware
 compatibility still need real-machine testing. GPU acceleration and Windows
