@@ -19,7 +19,10 @@ implemented here in Rust. Mathematical behavior follows the official model.
 Full upstream license texts are preserved under `third_party/`.
 
 The CPU weight backend in `src/models/qwen3/weights.rs` is new Valle code using
-Candle 0.11.0's public `SimpleBackend` and mapped safetensors APIs. Its direct
+Candle 0.11.0's public `SimpleBackend`, memmap2 0.9.11's portable mapping API and
+safetensors 0.8.0's validated metadata API. Per-tensor mappings are released
+after loading each weight. These dependencies use MIT/Apache-2.0 licenses and
+were already present transitively. Its direct
 BF16-to-F32 conversion follows IEEE bit layout and preserves the quiet-NaN
 behavior of Candle's `half` dependency. Regression tests compare all BF16 bit
 patterns with Candle's existing loader. Candle and half are MIT/Apache-2.0
