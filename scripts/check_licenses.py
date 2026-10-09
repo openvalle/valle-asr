@@ -37,7 +37,9 @@ assert not permissive("MIT AND GPL-3.0-only")
 assert not permissive(None)
 packages_by_id = {}
 workspace_packages = set()
-for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"):
+for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+               "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+               "x86_64-apple-darwin", "aarch64-apple-darwin"):
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", target]))
     workspace_packages.update(metadata["workspace_members"])
     resolved = {node["id"] for node in metadata["resolve"]["nodes"]}
@@ -50,4 +52,4 @@ if rejected:
     sys.exit("Dependency license is not on the permissive allowlist")
 if "--write" in sys.argv:
     pathlib.Path("third_party/crates.json").write_text(json.dumps(report, indent=2) + "\n")
-print(f"Permissive license choices verified for {len(report)} crates across Linux, Windows and macOS")
+print(f"Permissive license choices verified for {len(report)} crates across all six Linux, Windows and macOS x86_64/ARM64 targets")

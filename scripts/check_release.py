@@ -12,7 +12,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-WORKFLOWS = ("ci-linux.yml", "ci-macos.yml", "ci-windows.yml")
+WORKFLOWS = (
+    "ci-linux.yml", "ci-linux-arm64.yml",
+    "ci-windows.yml", "ci-windows-arm64.yml",
+    "ci-macos.yml", "ci-macos-x86_64.yml",
+)
 
 
 def request(url, token=None):

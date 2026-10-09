@@ -79,8 +79,9 @@ The official Apache-2.0 text is preserved in
 were checked against the latest stable crates.io releases on 2026-10-08.
 Transitive versions are determined by the latest upstream crates' constraints.
 `third_party/crates.json` records crate names, versions, SPDX licenses and source
-repositories for external dependencies; workspace packages are excluded from
-this third-party report. CI runs `scripts/check_licenses.py` and rejects missing licenses,
+repositories for external dependencies across the six Linux, Windows and macOS
+x86_64/ARM64 targets; workspace packages are excluded from this third-party
+report. CI runs `scripts/check_licenses.py` and rejects missing licenses,
 GPL-family licenses and any expression without a permitted license choice.
 Use of a dual-licensed dependency selects its permissive license option.
 
