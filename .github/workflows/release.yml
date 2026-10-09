@@ -1,0 +1,73 @@
+name: Release crate
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag matching Cargo.toml, such as v0.1.0
+        type: string
+        required: true
+      publish:
+        description: Upload to crates.io after validation
+        type: boolean
+        default: false
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: crates-io-release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag version, main ancestry and independent platform CI
+        id: identity
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/check_release.py ci
+      - name: Install Rust 1.99.0
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup default 1.99.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: linux-rust-1.99
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: Validate publishable archive
+        run: cargo publish --locked --dry-run --registry crates-io
+      - name: Check registry version and archive checksum
+        id: registry
+        run: python scripts/check_release.py registry
+      # The exact archive was built without credentials by the dry run above.
+      - name: Publish crate
+        if: steps.registry.outputs.publish_needed == 'true' && (github.event_name == 'release' || inputs.publish)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --no-verify --registry crates-io
+      - name: Confirm published archive checksum
+        if: github.event_name == 'release' || inputs.publish
+        run: python scripts/check_release.py confirm
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.identity.outputs.name }}-${{ steps.identity.outputs.version }}-release
+          path: target/package/${{ steps.identity.outputs.name }}-${{ steps.identity.outputs.version }}.crate
+          if-no-files-found: error
+          retention-days: 30
+      - name: Exclude package staging from the build cache
+        if: always()
+        run: python -c "import shutil; shutil.rmtree('target/package', ignore_errors=True)"

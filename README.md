@@ -288,8 +288,14 @@ version is declared in `Cargo.toml` and matches the toolchain used in CI.
 Before publishing, require all three platform workflows (including the explicit
 real-model tests) to pass, review the archive's contents and licenses, and confirm
 the version is new on crates.io. A dry run does not reserve the crate name or
-verify the publisher account's ownership. Actual publication is a separate
-release action using the authorized crates.io owner account.
+verify the publisher account's ownership. Publishing a GitHub Release tagged `v<version>` triggers
+`.github/workflows/release.yml`. The tag must match `Cargo.toml` and belong to
+main history; all three independent platform workflows must have passed at
+that exact commit. The workflow uses the repository secret
+`CARGO_REGISTRY_TOKEN`, validates the archive before uploading, and checks its
+SHA-256 against crates.io. Re-running an identical published archive is safe;
+an existing version with different contents is rejected. Manual dispatch can
+validate an existing tag with `publish: false` before uploading it.
 
 ## 0.1.0 release notes
 
