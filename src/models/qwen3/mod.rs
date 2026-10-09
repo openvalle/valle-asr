@@ -4,14 +4,18 @@ mod dsp;
 mod file;
 mod network;
 mod text;
+mod weights;
 
 use crate::{
     AsrModel, Audio, ModelInfo, Segment, TimestampMode, TranscribeOptions, Transcript, Word,
 };
 use anyhow::{Context, Result, bail, ensure};
-use candle_core::{IndexOp, Tensor};
+use candle_core::Tensor;
 use network::Network;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokenizers::Tokenizer;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,8 +31,8 @@ pub struct Qwen3 {
     id: String,
     model_dir: PathBuf,
     aligner_dir: Option<PathBuf>,
-    asr_tokenizer: Tokenizer,
-    aligner_tokenizer: Option<Tokenizer>,
+    asr_tokenizer: Arc<Tokenizer>,
+    aligner_tokenizer: Option<Arc<Tokenizer>>,
     resident: Option<(Kind, Network)>,
 }
 
@@ -48,11 +52,11 @@ impl Qwen3 {
         );
         let aligner_tokenizer = aligner_dir
             .as_ref()
-            .map(|path| text::tokenizer(path))
+            .map(|path| text::tokenizer(path).map(Arc::new))
             .transpose()?;
         Ok(Self {
             id: id.into(),
-            asr_tokenizer: text::tokenizer(&model_dir)?,
+            asr_tokenizer: Arc::new(text::tokenizer(&model_dir)?),
             model_dir,
             aligner_dir,
             aligner_tokenizer,
@@ -95,7 +99,7 @@ impl Qwen3 {
         samples: &[f32],
         options: &TranscribeOptions,
     ) -> Result<(String, String)> {
-        let tok = self.asr_tokenizer.clone();
+        let tok = Arc::clone(&self.asr_tokenizer);
         let network = self.session(Kind::Asr)?;
         let audio = network.audio(samples)?;
         let c = &network.config.thinker_config;
@@ -199,18 +203,20 @@ impl Qwen3 {
         let mut positions = Vec::with_capacity(words.len() * 2);
         for word in &words {
             ids.extend(text::encode(&tok, word)?);
-            positions.push(ids.len());
+            positions.push(u32::try_from(ids.len())?);
             ids.push(timestamp);
-            positions.push(ids.len());
+            positions.push(u32::try_from(ids.len())?);
             ids.push(timestamp);
         }
         let x = splice(network, &ids, audio_start, &audio)?;
-        let logits = network.decode(&x, 0, &mut network.cache(), false)?;
-        let mut timestamps = Vec::with_capacity(positions.len());
-        for pos in positions {
-            timestamps
-                .push(u64::from(logits.i((0, pos, ..))?.argmax(0)?.to_scalar::<u32>()?) * tick);
-        }
+        let timestamps: Vec<_> = network
+            .classify_positions(&x, &positions)?
+            .squeeze(0)?
+            .argmax(1)?
+            .to_vec1::<u32>()?
+            .into_iter()
+            .map(|index| u64::from(index) * tick)
+            .collect();
         let timestamps = text::repair_timestamps(&timestamps);
         let duration = (samples.len() as u64 * 1000).div_ceil(u64::from(Audio::SAMPLE_RATE));
         Ok(words
@@ -227,12 +233,11 @@ impl Qwen3 {
 
 fn splice(network: &Network, ids: &[u32], audio_start: usize, audio: &Tensor) -> Result<Tensor> {
     let n = audio.dim(0)?;
-    let x = network.embed(ids)?;
     Ok(Tensor::cat(
         &[
-            x.narrow(1, 0, audio_start)?,
+            network.embed(&ids[..audio_start])?,
             audio.unsqueeze(0)?,
-            x.narrow(1, audio_start + n, ids.len() - audio_start - n)?,
+            network.embed(&ids[audio_start + n..])?,
         ],
         1,
     )?)

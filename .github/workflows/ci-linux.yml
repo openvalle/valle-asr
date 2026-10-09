@@ -30,6 +30,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-rust-1.99
+          cache-workspace-crates: true
+          cache-on-failure: true
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
