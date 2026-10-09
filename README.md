@@ -100,7 +100,7 @@ can use their own media decoding for other formats.
 
 ```toml
 [dependencies]
-valle-asr = { version = "0.1.0", default-features = false, features = ["qwen3", "download"] }
+valle-asr = { version = "0.2.0", default-features = false, features = ["qwen3", "download"] }
 ```
 
 Model weights are downloaded separately and are not embedded in the crate.
@@ -291,7 +291,7 @@ cargo package --locked --list
 cargo publish --locked --dry-run
 ```
 
-The initial API is version 0.1.0. Breaking public API changes require a minor
+The current release is version 0.2.0. Breaking public API changes require a minor
 version increment before 1.0; compatible fixes use a patch increment. Document
 changes in the release notes and tag each published version. The minimum Rust
 version is declared in `Cargo.toml` and matches the toolchain used in CI.
@@ -307,6 +307,16 @@ passed at that exact commit. The workflow uses the repository secret
 SHA-256 against crates.io. Re-running an identical published archive is safe;
 an existing version with different contents is rejected. Manual dispatch can
 validate an existing tag with `publish: false` before uploading it.
+
+## 0.2.0 release notes
+
+- Native CPU support for Windows, Linux and macOS on both x86_64 and ARM64.
+- Real Qwen3-ASR and ForcedAligner 0.6B validation on all six targets, including
+  English/Chinese recognition, word timestamps, long files and cancellation.
+- Six independent native CI workflows with architecture-specific build caches
+  and shared revision-pinned model weights.
+- Release and permissive-license checks cover all six targets; no intentional
+  Rust API breaking changes in this release.
 
 ## 0.1.0 release notes
 
