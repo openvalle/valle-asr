@@ -79,6 +79,10 @@ With word timestamps, ASR runs first and writes interval/text records to a
 temporary file. Its neural weights are released before the alignment pass
 re-reads the same WAV. Each neural model loads once per stage. Final segments
 are emitted during alignment; text-only mode emits them during the first pass.
+Mapped BF16 weights are converted directly into owned CPU F32 storage without
+an intermediate BF16 tensor. Tokenizers are shared across chunks. Alignment
+retains the complete attention context but projects only timestamp positions
+and releases each layer's temporary KV after use; ASR keeps its decode KV.
 The JSON writer also spools text on disk so that the existing full `text` field
 does not require a growing RAM buffer. Temporary disk usage and processing time
 grow with duration, and temporary files are removed on success or error.

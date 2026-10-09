@@ -9,6 +9,10 @@ use candle_nn::{
 };
 use std::{collections::BTreeSet, path::Path};
 
+#[cfg(test)]
+#[path = "network_tests.rs"]
+mod tests;
+
 fn attention(q: &Tensor, k: &Tensor, v: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
     let mut scores = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? / (q.dim(3)? as f64).sqrt())?;
     if let Some(mask) = mask {
@@ -206,7 +210,7 @@ impl TextLayer {
         x: &Tensor,
         cos: &Tensor,
         sin: &Tensor,
-        cache: &mut Option<(Tensor, Tensor)>,
+        cache: Option<&mut Option<(Tensor, Tensor)>>,
         mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (b, s, _) = x.dims3()?;
@@ -228,12 +232,14 @@ impl TextLayer {
             sin,
         )?;
         let v = project(&self.v, self.kv_heads)?;
-        let (k, v) = if let Some((pk, pv)) = cache.as_ref() {
+        let (k, v) = if let Some((pk, pv)) = cache.as_deref().and_then(Option::as_ref) {
             (Tensor::cat(&[pk, &k], 2)?, Tensor::cat(&[pv, &v], 2)?)
         } else {
             (k, v)
         };
-        *cache = Some((k.clone(), v.clone()));
+        if let Some(cache) = cache {
+            *cache = Some((k.clone(), v.clone()));
+        }
         let repeats = self.heads / self.kv_heads;
         let repeat = |t: Tensor| -> Result<Tensor> {
             let seq = t.dim(2)?;
@@ -295,9 +301,7 @@ impl Network {
         } else {
             vec![root.join("model.safetensors")]
         };
-        // Candle uses portable memmap2. The model cache is immutable while open;
-        // updates are downloaded to another file and atomically renamed.
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&paths, DType::F32, &Device::Cpu)? };
+        let vb = super::weights::load(&paths)?;
         let t = &config.thinker_config.text_config;
         let text = vb.pp("thinker.model");
         let embedding = text.get((t.vocab_size, t.hidden_size), "embed_tokens.weight")?;
@@ -343,6 +347,29 @@ impl Network {
         cache: &mut Cache,
         last_only: bool,
     ) -> Result<Tensor> {
+        let h = self.forward_hidden(x, offset, Some(cache))?;
+        let h = if last_only {
+            h.i((.., h.dim(1)? - 1.., ..))?
+        } else {
+            h
+        };
+        Ok(self.head.forward(&self.norm.forward(&h)?)?)
+    }
+
+    /// Alignment is one full-context forward, without retaining layer KV.
+    /// Only timestamp rows need normalization and the classifier projection.
+    pub fn classify_positions(&self, x: &Tensor, positions: &[u32]) -> Result<Tensor> {
+        let h = self.forward_hidden(x, 0, None)?;
+        let h = h.index_select(&Tensor::new(positions, &Device::Cpu)?, 1)?;
+        Ok(self.head.forward(&self.norm.forward(&h)?)?)
+    }
+
+    fn forward_hidden(
+        &self,
+        x: &Tensor,
+        offset: usize,
+        mut cache: Option<&mut Cache>,
+    ) -> Result<Tensor> {
         let seq = x.dim(1)?;
         let t = &self.config.thinker_config.text_config;
         ensure!(
@@ -383,14 +410,10 @@ impl Network {
             None
         };
         let mut h = x.clone();
-        for (layer, kv) in self.layers.iter().zip(cache.iter_mut()) {
+        for (index, layer) in self.layers.iter().enumerate() {
+            let kv = cache.as_deref_mut().map(|cache| &mut cache[index]);
             h = layer.forward(&h, &cos, &sin, kv, mask.as_ref())?;
         }
-        let h = if last_only {
-            h.i((.., seq - 1..seq, ..))?
-        } else {
-            h
-        };
-        Ok(self.head.forward(&self.norm.forward(&h)?)?)
+        Ok(h)
     }
 }

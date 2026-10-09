@@ -18,6 +18,14 @@ implemented here in Rust. Mathematical behavior follows the official model.
 
 Full upstream license texts are preserved under `third_party/`.
 
+The CPU weight backend in `src/models/qwen3/weights.rs` is new Valle code using
+Candle 0.11.0's public `SimpleBackend` and mapped safetensors APIs. Its direct
+BF16-to-F32 conversion follows IEEE bit layout and preserves the quiet-NaN
+behavior of Candle's `half` dependency. Regression tests compare all BF16 bit
+patterns with Candle's existing loader. Candle and half are MIT/Apache-2.0
+dependencies already recorded in `third_party/crates.json`; no source files
+from either crate are copied or vendored here.
+
 Long-file regression tests generate sparse PCM WAV files in `tests/support/`.
 Their real speech inserts repeat the existing MIT-licensed `sample1.wav` at
 both ends of a two-hour timeline; no additional audio corpus or external

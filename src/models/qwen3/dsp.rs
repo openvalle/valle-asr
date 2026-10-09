@@ -33,9 +33,14 @@ pub(super) fn mel(samples: &[f32]) -> Result<Tensor> {
             *b = Complex::new(signal[reflected as usize] * window[i], 0.0);
         }
         fft.process_with_scratch(&mut buffer, &mut scratch);
+        // The spectrum is no longer needed after its power is computed. Reuse
+        // its real slots instead of recomputing power for every mel channel.
+        for bin in &mut buffer[..frequencies] {
+            bin.re = bin.norm_sqr();
+        }
         for m in 0..BINS {
             values[m * frames + frame] = (0..frequencies)
-                .map(|f| filters[m * frequencies + f] * buffer[f].norm_sqr())
+                .map(|f| filters[m * frequencies + f] * buffer[f].re)
                 .sum::<f32>()
                 .max(1e-10)
                 .log10();
