@@ -46,10 +46,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: linux-rust-1.99
+          shared-key: validate
           cache-workspace-crates: true
           cache-on-failure: true
       - name: Validate publishable archive
         run: cargo publish --locked --dry-run --registry crates-io
+      - name: Retain verified crate archive
+        run: cargo package --locked --no-verify
       - name: Check registry version and archive checksum
         id: registry
         run: python scripts/check_release.py registry
