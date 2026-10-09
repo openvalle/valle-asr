@@ -1,21 +1,61 @@
 //! Convert mapped BF16 weights straight into their final CPU F32 storage.
-use candle_core::{DType, Device, Error, Result, Shape, Tensor, safetensors::MmapedSafetensors};
+use candle_core::{DType, Device, Error, Result, Shape, Tensor};
 use candle_nn::{Init, VarBuilder, var_builder::SimpleBackend};
-use std::path::PathBuf;
+use memmap2::MmapOptions;
+use safetensors::{SafeTensors, tensor::Dtype};
+use std::{collections::HashMap, fs::File, path::PathBuf};
 
-struct CpuWeights(MmapedSafetensors);
+struct Shard {
+    file: File,
+    path: PathBuf,
+}
+
+struct Weight {
+    shard: usize,
+    shape: Shape,
+    dtype: Dtype,
+    offset: u64,
+    bytes: usize,
+}
+
+struct CpuWeights {
+    shards: Vec<Shard>,
+    weights: HashMap<String, Weight>,
+}
 
 impl CpuWeights {
+    fn info(&self, name: &str) -> Result<&Weight> {
+        self.weights.get(name).ok_or_else(|| {
+            Error::CannotFindTensor {
+                path: name.to_owned(),
+            }
+            .bt()
+        })
+    }
+
     fn tensor(&self, name: &str, dtype: DType, device: &Device) -> Result<Tensor> {
-        let view = self.0.get(name)?;
+        let info = self.info(name)?;
+        if info.bytes == 0 {
+            return Tensor::zeros(info.shape.clone(), dtype, device);
+        }
+        let shard = &self.shards[info.shard];
+        // SAFETY: the immutable file handle is the same one whose complete
+        // safetensors metadata was validated. Map only this tensor's bytes;
+        // dropping this window releases its resident mapping after conversion.
+        let mapped = unsafe {
+            MmapOptions::new()
+                .offset(info.offset)
+                .len(info.bytes)
+                .map(&shard.file)
+        }
+        .map_err(|e| Error::from(e).with_path(&shard.path))?;
         if matches!(device, Device::Cpu)
             && dtype == DType::F32
-            && DType::try_from(view.dtype())? == DType::BF16
+            && DType::try_from(info.dtype)? == DType::BF16
         {
             // Safetensors stores little-endian data. Reading bytes avoids
             // alignment assumptions and an intermediate owned BF16 tensor.
-            let values: Vec<f32> = view
-                .data()
+            let values: Vec<f32> = mapped
                 .as_chunks::<2>()
                 .0
                 .iter()
@@ -30,9 +70,15 @@ impl CpuWeights {
                     f32::from_bits(u32::from(bits) << 16)
                 })
                 .collect();
-            Tensor::from_vec(values, view.shape(), device)
+            Tensor::from_vec(values, info.shape.clone(), device)
         } else {
-            self.0.load(name, device)?.to_dtype(dtype)
+            Tensor::from_raw_buffer(
+                &mapped,
+                DType::try_from(info.dtype)?,
+                info.shape.dims(),
+                device,
+            )?
+            .to_dtype(dtype)
         }
     }
 }
@@ -46,7 +92,7 @@ impl SimpleBackend for CpuWeights {
         dtype: DType,
         device: &Device,
     ) -> Result<Tensor> {
-        let actual: Shape = self.0.get(name)?.shape().into();
+        let actual = self.info(name)?.shape.clone();
         if actual != shape {
             return Err(Error::UnexpectedShape {
                 msg: format!("shape mismatch for {name}"),
@@ -63,16 +109,42 @@ impl SimpleBackend for CpuWeights {
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
-        self.0.get(name).is_ok()
+        self.weights.contains_key(name)
     }
 }
 
 pub(super) fn load(paths: &[PathBuf]) -> Result<VarBuilder<'static>> {
-    // SAFETY: model files are immutable while mapped. Cache updates use a
-    // separate file and atomic rename; returned tensors own their final data.
-    let mapped = unsafe { MmapedSafetensors::multi(paths)? };
+    let mut backend = CpuWeights {
+        shards: Vec::new(),
+        weights: HashMap::new(),
+    };
+    for path in paths {
+        let file = File::open(path).map_err(|e| Error::from(e).with_path(path))?;
+        // SAFETY: cache files are immutable; keeping this handle also makes
+        // later tensor windows consistent across an atomic path replacement.
+        let mapped = unsafe { MmapOptions::new().map(&file)? };
+        let (header_bytes, metadata) = SafeTensors::read_metadata(&mapped)?;
+        for (name, info) in metadata.tensors() {
+            backend.weights.insert(
+                name,
+                Weight {
+                    shard: backend.shards.len(),
+                    shape: info.shape.clone().into(),
+                    dtype: info.dtype,
+                    offset: (header_bytes + 8 + info.data_offsets.0) as u64,
+                    bytes: info.data_offsets.1 - info.data_offsets.0,
+                },
+            );
+        }
+        // No file payload is touched by metadata validation. This initial
+        // whole-file mapping is dropped before any F32 weight is allocated.
+        backend.shards.push(Shard {
+            file,
+            path: path.clone(),
+        });
+    }
     Ok(VarBuilder::from_backend(
-        Box::new(CpuWeights(mapped)),
+        Box::new(backend),
         DType::F32,
         Device::Cpu,
     ))
@@ -81,6 +153,7 @@ pub(super) fn load(paths: &[PathBuf]) -> Result<VarBuilder<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::safetensors::MmapedSafetensors;
     use std::io::Write;
 
     fn safetensor(
@@ -144,6 +217,22 @@ mod tests {
         assert!(vb.contains_tensor("other"));
         assert!(!vb.contains_tensor("missing"));
         assert_eq!(vb.get_unchecked("other")?.dims(), [2]);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_tensors_and_truncated_payloads() -> Result<()> {
+        let empty = safetensor("weight", "BF16", &[0], &[]);
+        assert_eq!(
+            load(&[empty.path().to_path_buf()])?
+                .get(0, "weight")?
+                .dims(),
+            [0]
+        );
+        let truncated = safetensor("weight", "BF16", &[2], &[0x80, 0x3f, 0x00, 0xc0]);
+        let length = truncated.as_file().metadata()?.len();
+        truncated.as_file().set_len(length - 1)?;
+        assert!(load(&[truncated.path().to_path_buf()]).is_err());
         Ok(())
     }
 }

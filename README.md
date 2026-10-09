@@ -80,7 +80,9 @@ temporary file. Its neural weights are released before the alignment pass
 re-reads the same WAV. Each neural model loads once per stage. Final segments
 are emitted during alignment; text-only mode emits them during the first pass.
 Mapped BF16 weights are converted directly into owned CPU F32 storage without
-an intermediate BF16 tensor. Tokenizers are shared across chunks. Alignment
+an intermediate BF16 tensor. Each tensor uses a short-lived mapping, so whole
+checkpoint mappings do not remain resident alongside the final F32 weights.
+Tokenizers are shared across chunks. Alignment
 retains the complete attention context but projects only timestamp positions
 and releases each layer's temporary KV after use; ASR keeps its decode KV.
 The JSON writer also spools text on disk so that the existing full `text` field
