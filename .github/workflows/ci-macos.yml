@@ -49,6 +49,10 @@ jobs:
         run: cargo doc --locked --no-default-features --features qwen3,download --no-deps --lib
       - name: Verify publishable crate archive
         run: cargo publish --locked --dry-run
+      # Publish dry-run validates a temporary archive. Retain the same
+      # clean sources for review after the full verification succeeds.
+      - name: Retain verified crate archive
+        run: cargo package --locked --no-verify
       - name: Upload verified crate archive
         uses: actions/upload-artifact@v7.0.2
         with:
