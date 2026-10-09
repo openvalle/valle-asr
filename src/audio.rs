@@ -8,8 +8,13 @@ pub struct Audio {
 }
 
 impl Audio {
+    /// Sample rate of normalized mono PCM, in hertz.
     pub const SAMPLE_RATE: u32 = 16_000;
 
+    /// Validate mono PCM and resample it to 16 kHz.
+    ///
+    /// # Errors
+    /// Rejects empty audio, zero sample rate, and samples outside finite `[-1, 1]`.
     pub fn from_mono(samples: Vec<f32>, sample_rate: u32) -> Result<Self> {
         ensure!(sample_rate > 0, "sample rate must be positive");
         ensure!(!samples.is_empty(), "audio is empty");
@@ -28,6 +33,11 @@ impl Audio {
         Ok(Self { samples })
     }
 
+    /// Read an entire PCM/float WAV, mix channels to mono, and resample.
+    /// For long files, prefer [`crate::WavChunks`].
+    ///
+    /// # Errors
+    /// Returns an error for I/O failures, unsupported WAV data or invalid PCM.
     pub fn from_wav(path: impl AsRef<Path>) -> Result<Self> {
         let mut wav = hound::WavReader::open(path.as_ref())
             .with_context(|| format!("open WAV {}", path.as_ref().display()))?;
@@ -55,10 +65,12 @@ impl Audio {
         Self::from_mono(samples, spec.sample_rate)
     }
 
+    /// Borrow the normalized mono 16 kHz samples.
     pub fn samples(&self) -> &[f32] {
         &self.samples
     }
 
+    /// Source duration rounded up to the next millisecond.
     pub fn duration_ms(&self) -> u64 {
         (self.samples.len() as u64 * 1000).div_ceil(u64::from(Self::SAMPLE_RATE))
     }

@@ -97,11 +97,19 @@ can use their own media decoding for other formats.
 
 ## Rust API
 
+```toml
+[dependencies]
+valle-asr = { version = "0.1.0", default-features = false, features = ["qwen3", "download"] }
+```
+
+Model weights are downloaded separately and are not embedded in the crate.
+
 ```rust,no_run
+# #[cfg(feature = "qwen3")]
+# fn main() -> anyhow::Result<()> {
 use std::{fs::File, io::BufWriter};
 use valle_asr::{AsrEngine, JsonTranscriptWriter, TranscribeOptions, models::qwen3::Qwen3};
 
-# fn main() -> anyhow::Result<()> {
 let mut engine = AsrEngine::new();
 engine.register(Qwen3::load(
     "qwen3-asr-0.6b",
@@ -118,6 +126,8 @@ let summary = engine.transcribe_file(
 output.finish(&summary)?;
 # Ok(())
 # }
+# #[cfg(not(feature = "qwen3"))]
+# fn main() {}
 ```
 
 The existing `transcribe(&Audio, ...)` API remains available for already-loaded
@@ -129,6 +139,15 @@ Implement `AsrModel` to register another model family. `AsrEngine` dispatches
 to the selected registered instance. Backends receive the same normalized
 audio and return the same model-independent result types. Qwen is optional:
 `cargo check --no-default-features --lib` builds the core API alone.
+
+### Features
+
+- `qwen3`: the built-in Qwen3 CPU backend.
+- `download`: revision-pinned model downloads with size and SHA-256 checks.
+- `cli`: the command-line application, including `qwen3` and `download`.
+
+All three are enabled by default. The model-independent core can be used with
+`default-features = false` and no additional features.
 
 ## Cache behavior
 
@@ -181,6 +200,59 @@ cargo run --locked --release -- download --cache-dir models
 VALLE_ASR_TEST_CACHE=models cargo test --locked --release --test real_models -- --ignored --nocapture
 ```
 
-See [THIRD_PARTY.md](THIRD_PARTY.md) for exact source revisions, affected code,
+See [THIRD_PARTY.md](https://github.com/openvalle/valle-asr/blob/main/THIRD_PARTY.md) for exact source revisions, affected code,
 fixture provenance, preserved notices and dependency licenses. Only
 permissively licensed references are used. Project license: Apache-2.0.
+
+## Crate development and release checks
+
+The crate targets Rust 1.99+ and edition 2024. Run formatting, Clippy, unit/API
+tests, documentation and packaging checks before a release. Public APIs must
+document units, callback execution, resource ownership and failure conditions;
+missing public documentation and broken Rustdoc links fail validation. The README
+provides the crate-level documentation, and its Rust example is compiled as a
+documentation test.
+Changes to native sources must retain upstream notices, source hashes and
+reproducible patches. The permissive-license policy in THIRD_PARTY.md applies.
+
+The default features are `qwen3`, `download` and `cli`. Library consumers can use
+`default-features = false` with `features = ["qwen3"]` for local model directories,
+or add `download` for the verified cache. No-default-features builds expose the
+model-independent core. The `cli` feature enables the backend and downloader;
+Clap is excluded from builds that omit `cli`. This ASR backend uses portable Rust CPU inference.
+
+Each independent Windows/Linux/macOS workflow checks supported feature
+combinations, warning-free API documentation and `cargo publish --dry-run`,
+which extracts and builds the exact crate archive without uploading it.
+Packaging explicitly includes source, model catalogs, test fixtures and third
+party notices.
+Model weights, generated audio, local artifacts and build caches are excluded.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo test --locked --no-default-features
+cargo doc --locked --no-default-features --features qwen3,download --no-deps --lib
+cargo package --locked --list
+cargo publish --locked --dry-run
+```
+
+The initial API is version 0.1.0. Breaking public API changes require a minor
+version increment before 1.0; compatible fixes use a patch increment. Document
+changes in the release notes and tag each published version. The minimum Rust
+version is declared in `Cargo.toml` and matches the toolchain used in CI.
+
+Before publishing, require all three platform workflows (including the explicit
+real-model tests) to pass, review the archive's contents and licenses, and confirm
+the version is new on crates.io. A dry run does not reserve the crate name or
+verify the publisher account's ownership. Actual publication is a separate
+release action using the authorized crates.io owner account.
+
+## 0.1.0 release notes
+
+- Initial Rust library and CLI with pluggable ASR backends.
+- Qwen3-ASR 0.6B/1.7B local loading and Qwen3-ForcedAligner word timestamps.
+- Bounded WAV chunking and streamed JSON for long files.
+- Revision-pinned, verified model downloads and permissively licensed sources.
+- Independent Linux, Windows and macOS CI with real-model and crate checks.

@@ -6,7 +6,10 @@ use std::{collections::BTreeMap, path::Path};
 
 /// The extension point for model families. No Qwen types appear in this contract.
 pub trait AsrModel: Send {
+    /// Return the backend identity and capabilities.
     fn info(&self) -> ModelInfo;
+    /// Recognize in-memory audio. Segment and word times are relative to this input.
+    /// Backends must honor supported options and return errors for failed inference.
     fn transcribe(&mut self, audio: &Audio, options: &TranscribeOptions) -> Result<Transcript>;
 
     /// Process one complete WAV with bounded audio buffers, delivering results
@@ -53,15 +56,21 @@ pub trait AsrModel: Send {
 }
 
 #[derive(Default)]
+/// A registry that dispatches requests to independently registered models.
 pub struct AsrEngine {
     models: BTreeMap<String, Box<dyn AsrModel>>,
 }
 
 impl AsrEngine {
+    /// Create an empty model registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Register a model under its reported ID.
+    ///
+    /// # Errors
+    /// Returns an error if the ID is empty or already registered.
     pub fn register(&mut self, model: impl AsrModel + 'static) -> Result<()> {
         let id = model.info().id;
         ensure!(!id.is_empty(), "model ID is empty");
@@ -73,10 +82,15 @@ impl AsrEngine {
         Ok(())
     }
 
+    /// Return model capabilities in ascending model-ID order.
     pub fn models(&self) -> Vec<ModelInfo> {
         self.models.values().map(|m| m.info()).collect()
     }
 
+    /// Recognize in-memory audio with the selected backend.
+    ///
+    /// # Errors
+    /// Rejects an unregistered model ID and propagates backend failures.
     pub fn transcribe(
         &mut self,
         model: &str,
@@ -91,6 +105,9 @@ impl AsrEngine {
 
     /// Stream a complete file through the selected backend. The caller decides
     /// whether segments are displayed, persisted, or collected in memory.
+    ///
+    /// # Errors
+    /// Rejects an unregistered model ID and propagates decoding, inference and sink errors.
     pub fn transcribe_file(
         &mut self,
         model: &str,

@@ -24,7 +24,8 @@ enum Kind {
     Aligner,
 }
 
-/// Lazy model with a bounded resident cache. ASR runs for all chunks first,
+/// Qwen3-ASR with optional learned word alignment and one resident CPU network.
+/// ASR runs for all chunks first,
 /// then its weights are released before the aligner loads. The final session
 /// stays cached for repeated text-only transcription or standalone alignment.
 pub struct Qwen3 {
@@ -37,6 +38,13 @@ pub struct Qwen3 {
 }
 
 impl Qwen3 {
+    /// Load configuration/tokenizers from official local checkpoint directories.
+    /// Neural weights load lazily on the first inference request. The caller
+    /// supplies an engine ID; it does not select a checkpoint architecture.
+    ///
+    /// # Errors
+    /// Rejects unreadable or unsupported configuration/tokenizers, including
+    /// an aligner checkpoint passed as the ASR directory. No files are downloaded.
     pub fn load(
         id: impl Into<String>,
         model_dir: impl AsRef<Path>,
@@ -145,6 +153,13 @@ impl Qwen3 {
     }
 
     /// Align a known transcript to a single clip of at most 30 seconds.
+    ///
+    /// Empty text returns no words. Times are relative to the supplied clip.
+    /// Chinese/Cantonese units are Han characters.
+    ///
+    /// # Errors
+    /// Rejects clips over 30 seconds, unsupported alignment languages, missing
+    /// aligner weights, and failed model loading or inference.
     pub fn align(&mut self, audio: &Audio, transcript: &str, language: &str) -> Result<Vec<Word>> {
         ensure!(
             audio.samples().len() <= 30 * Audio::SAMPLE_RATE as usize,
