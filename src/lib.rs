@@ -1,12 +1,11 @@
-//! Local speech recognition with model-independent audio, results, and dispatch.
-//!
-//! Qwen3-ASR is the first backend. Applications can register additional backends
-//! through [`AsrModel`] without changing the result contract or the engine.
+#![doc = include_str!("../README.md")]
+#![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 mod audio;
 #[cfg(feature = "download")]
 pub mod cache;
 mod engine;
+/// Built-in optional model backends.
 pub mod models;
 mod output;
 mod streaming;

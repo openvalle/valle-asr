@@ -9,15 +9,19 @@ use std::{
 
 /// One normalized source interval. Sample offsets are on the 16 kHz timeline.
 pub struct AudioChunk {
+    /// Normalized mono audio for this interval.
     pub audio: Audio,
+    /// Absolute first sample on the normalized 16 kHz source timeline.
     pub start_sample: u64,
 }
 
 impl AudioChunk {
+    /// Absolute interval start, rounded up to milliseconds.
     pub fn start_ms(&self) -> u64 {
         (self.start_sample * 1000).div_ceil(u64::from(Audio::SAMPLE_RATE))
     }
 
+    /// Absolute interval end, rounded up to milliseconds.
     pub fn end_ms(&self) -> u64 {
         ((self.start_sample + self.audio.samples().len() as u64) * 1000)
             .div_ceil(u64::from(Audio::SAMPLE_RATE))
@@ -41,6 +45,12 @@ pub struct WavChunks {
 }
 
 impl WavChunks {
+    /// Open a RIFF WAV with a maximum normalized chunk duration of 1–30 seconds.
+    /// Supports integer/float PCM up to 384 kHz and chooses quiet boundaries.
+    ///
+    /// # Errors
+    /// Rejects empty, truncated or unsupported WAV data, invalid chunk duration,
+    /// and filesystem failures. RF64 and compressed audio are unsupported.
     pub fn open(path: impl AsRef<Path>, chunk_seconds: u32) -> Result<Self> {
         ensure!(
             (1..=30).contains(&chunk_seconds),
@@ -102,6 +112,7 @@ impl WavChunks {
         })
     }
 
+    /// Full source duration rounded up to milliseconds.
     pub fn duration_ms(&self) -> u64 {
         (self.total_samples * 1000).div_ceil(u64::from(Audio::SAMPLE_RATE))
     }
@@ -111,6 +122,10 @@ impl WavChunks {
         self.position = 0;
     }
 
+    /// Decode the next bounded interval; `None` means end of source.
+    ///
+    /// # Errors
+    /// Returns an error for read/seek failures or invalid PCM samples.
     pub fn next_chunk(&mut self) -> Result<Option<AudioChunk>> {
         if self.position == self.total_samples {
             return Ok(None);

@@ -35,9 +35,27 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Check optional backend boundary
-        run: cargo check --locked --no-default-features --lib
+        run: cargo test --locked --no-default-features
+      - name: Feature combinations
+        run: |
+          cargo check --locked --no-default-features --features download --all-targets
+          cargo check --locked --no-default-features --features qwen3 --all-targets
+          cargo check --locked --no-default-features --features qwen3,download --all-targets
+      - name: Public API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-default-features --features qwen3,download --no-deps --lib
+      - name: Verify publishable crate archive
+        run: cargo publish --locked --dry-run
+      - name: Upload verified crate archive
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: linux-valle-asr-crate
+          path: target/package/valle-asr-*.crate
+          if-no-files-found: error
+          retention-days: 14
       - name: Permissive dependency licenses
         run: python scripts/check_licenses.py
       - name: Unit and API tests

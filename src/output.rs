@@ -12,6 +12,10 @@ pub struct JsonTranscriptWriter<W: Write> {
 }
 
 impl<W: Write> JsonTranscriptWriter<W> {
+    /// Start a JSON document and create a temporary text spool.
+    ///
+    /// # Errors
+    /// Returns an error if temporary storage or the destination writer fails.
     pub fn new(mut output: W) -> Result<Self> {
         let text = BufWriter::new(NamedTempFile::new()?);
         output.write_all(b"{\"segments\":[\n")?;
@@ -22,6 +26,10 @@ impl<W: Write> JsonTranscriptWriter<W> {
         })
     }
 
+    /// Append one segment and spool its text without retaining it in RAM.
+    ///
+    /// # Errors
+    /// Propagates destination and temporary-storage write failures.
     pub fn write_segment(&mut self, segment: Segment) -> Result<()> {
         if self.segments > 0 {
             self.output.write_all(b",\n")?;
@@ -35,6 +43,11 @@ impl<W: Write> JsonTranscriptWriter<W> {
         Ok(())
     }
 
+    /// Finish the document, flush it, and return the destination writer.
+    /// Dropping without finishing leaves the destination JSON incomplete.
+    ///
+    /// # Errors
+    /// Rejects a summary with a different segment count and propagates I/O errors.
     pub fn finish(mut self, summary: &TranscriptSummary) -> Result<W> {
         ensure!(
             self.segments == summary.segment_count,

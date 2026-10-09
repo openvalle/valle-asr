@@ -10,25 +10,37 @@ use std::{
 };
 
 #[derive(Debug, Clone, Deserialize)]
+/// One immutable model artifact with its expected size and SHA-256 digest.
 pub struct ModelFile {
+    /// Single file name relative to the model revision directory.
     pub path: String,
+    /// Expected artifact size in bytes.
     pub bytes: u64,
+    /// Hexadecimal SHA-256 digest of the complete file.
     pub sha256: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// A downloadable model revision and all artifacts needed to load it.
 pub struct ModelSpec {
+    /// Unique model ID used for selection and cache layout.
     pub id: String,
+    /// Hugging Face repository in `owner/name` form.
     pub repository: String,
+    /// Pinned upstream commit or immutable revision.
     pub revision: String,
+    /// License identifier supplied by the model catalog.
     pub license: String,
+    /// Files verified before the revision is returned to the caller.
     pub files: Vec<ModelFile>,
 }
 
+/// Return the revision-pinned model catalog embedded in this crate.
 pub fn builtin_models() -> Vec<ModelSpec> {
     serde_json::from_str(include_str!("../models.json")).expect("embedded model catalog is valid")
 }
 
+/// Find a built-in model by ID. Returns an error for an unknown ID.
 pub fn builtin_model(id: &str) -> Result<ModelSpec> {
     builtin_models()
         .into_iter()
@@ -36,13 +48,19 @@ pub fn builtin_model(id: &str) -> Result<ModelSpec> {
         .with_context(|| format!("unknown model: {id}"))
 }
 
+/// On-disk, cross-process-locked model storage with verified downloads.
 pub struct ModelCache {
     root: PathBuf,
 }
 impl ModelCache {
+    /// Select a cache root; directories are created when [`Self::ensure`] runs.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
+    /// Resolve `VALLE_ASR_CACHE`, then the platform user cache directory.
+    ///
+    /// # Errors
+    /// Returns an error if no override or usable user directory is available.
     pub fn default_path() -> Result<PathBuf> {
         if let Some(path) = std::env::var_os("VALLE_ASR_CACHE") {
             return Ok(path.into());
@@ -66,6 +84,14 @@ impl ModelCache {
     }
     /// Validate every file even on a cache hit. Offline never uses corrupt or
     /// incomplete artifacts. Per-revision file locks serialize concurrent writers.
+    ///
+    /// Even offline calls create the revision directory and writer lock, so
+    /// the cache root must be writable. Model files must remain immutable while
+    /// loaded by an inference backend.
+    ///
+    /// # Errors
+    /// Returns an error for unsafe path components, invalid or missing offline
+    /// artifacts, failed downloads, hash mismatches, or filesystem failures.
     pub fn ensure(&self, spec: &ModelSpec, offline: bool) -> Result<PathBuf> {
         validate_component(&spec.id)?;
         validate_component(&spec.revision)?;

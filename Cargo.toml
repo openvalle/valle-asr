@@ -6,9 +6,26 @@ rust-version = "1.99"
 license = "Apache-2.0"
 description = "Cross-platform local speech recognition with pluggable models and word timestamps"
 repository = "https://github.com/openvalle/valle-asr"
+homepage = "https://github.com/openvalle/valle-asr"
+documentation = "https://docs.rs/valle-asr"
+readme = "README.md"
+keywords = ["speech", "asr", "qwen", "transcription", "timestamps"]
+categories = ["multimedia::audio"]
+include = ["src/**", "tests/**", "third_party/**", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "THIRD_PARTY.md", "models.json"]
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["qwen3", "download"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[[bin]]
+name = "valle-asr"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [features]
-default = ["qwen3", "download"]
+default = ["qwen3", "download", "cli"]
+cli = ["dep:clap", "qwen3", "download"]
 qwen3 = ["dep:candle-core", "dep:candle-nn", "dep:memmap2", "dep:safetensors", "dep:rustfft", "dep:tokenizers"]
 download = ["dep:reqwest", "dep:sha2", "dep:fs2"]
 
@@ -18,7 +35,7 @@ candle-core = { version = "0.11.0", default-features = false, optional = true }
 candle-nn = { version = "0.11.0", default-features = false, optional = true }
 memmap2 = { version = "0.9.11", optional = true }
 safetensors = { version = "0.8.0", optional = true }
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"], optional = true }
 hound = "3.5.1"
 rustfft = { version = "6.4.1", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
