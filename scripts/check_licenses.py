@@ -36,12 +36,14 @@ assert not permissive("GPL-3.0-only")
 assert not permissive("MIT AND GPL-3.0-only")
 assert not permissive(None)
 packages_by_id = {}
+workspace_packages = set()
 for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"):
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", target]))
+    workspace_packages.update(metadata["workspace_members"])
     resolved = {node["id"] for node in metadata["resolve"]["nodes"]}
     packages_by_id.update((p["id"], p) for p in metadata["packages"] if p["id"] in resolved)
 packages = sorted(packages_by_id.values(), key=lambda p: (p["name"], p["version"]))
-report = [{"name": p["name"], "version": p["version"], "license": p["license"], "repository": p["repository"]} for p in packages]
+report = [{"name": p["name"], "version": p["version"], "license": p["license"], "repository": p["repository"]} for p in packages if p["id"] not in workspace_packages]
 rejected = [p for p in report if not permissive(p["license"])]
 if rejected:
     print(json.dumps(rejected, indent=2), file=sys.stderr)

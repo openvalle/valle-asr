@@ -1422,12 +1422,6 @@
     "repository": "https://github.com/alacritty/vte"
   },
   {
-    "name": "valle-asr",
-    "version": "0.1.0",
-    "license": "Apache-2.0",
-    "repository": "https://github.com/openvalle/valle-asr"
-  },
-  {
     "name": "version_check",
     "version": "0.9.5",
     "license": "MIT/Apache-2.0",
