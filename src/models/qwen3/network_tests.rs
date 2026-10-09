@@ -97,9 +97,15 @@ fn close(actual: &Tensor, expected: &Tensor) -> Result<()> {
 fn timestamp_rows_match_full_context_classifier() -> Result<()> {
     let model = model()?;
     let input = input()?;
-    let complete = model.decode(&input, 0, &mut model.cache(), false)?;
+    let complete = model.decode(
+        &input,
+        0,
+        &mut model.cache(),
+        false,
+        &CancellationToken::default(),
+    )?;
     // Out-of-order, repeated positions ensure gathering preserves row identity.
-    let selected = model.classify_positions(&input, &[2, 0, 2])?;
+    let selected = model.classify_positions(&input, &[2, 0, 2], &CancellationToken::default())?;
     for (row, position) in [2, 0, 2].into_iter().enumerate() {
         close(&selected.i((0, row, ..))?, &complete.i((0, position, ..))?)?;
     }
@@ -110,11 +116,54 @@ fn timestamp_rows_match_full_context_classifier() -> Result<()> {
 fn incremental_decode_matches_causal_full_forward() -> Result<()> {
     let model = model()?;
     let input = input()?;
-    let complete = model.decode(&input, 0, &mut model.cache(), false)?;
+    let complete = model.decode(
+        &input,
+        0,
+        &mut model.cache(),
+        false,
+        &CancellationToken::default(),
+    )?;
     let mut cache = model.cache();
     for offset in 0..3 {
-        let step = model.decode(&input.narrow(1, offset, 1)?, offset, &mut cache, true)?;
+        let step = model.decode(
+            &input.narrow(1, offset, 1)?,
+            offset,
+            &mut cache,
+            true,
+            &CancellationToken::default(),
+        )?;
         close(&step, &complete.i((.., offset..offset + 1, ..))?)?;
     }
+    Ok(())
+}
+
+#[test]
+fn cancelled_encoder_decoder_and_classifier_keep_model_reusable() -> Result<()> {
+    let model = model()?;
+    let token = CancellationToken::default();
+    token.cancel();
+    assert!(
+        model
+            .audio(&[0.0; 1600], &token)
+            .unwrap_err()
+            .is::<crate::Cancelled>()
+    );
+    let x = input()?;
+    assert!(
+        model
+            .decode(&x, 0, &mut model.cache(), true, &token)
+            .unwrap_err()
+            .is::<crate::Cancelled>()
+    );
+    assert!(
+        model
+            .classify_positions(&x, &[0], &token)
+            .unwrap_err()
+            .is::<crate::Cancelled>()
+    );
+    let active = CancellationToken::default();
+    let complete = model.decode(&x, 0, &mut model.cache(), false, &active)?;
+    let selected = model.classify_positions(&x, &[0], &active)?;
+    close(&selected.i((0, 0, ..))?, &complete.i((0, 0, ..))?)?;
     Ok(())
 }

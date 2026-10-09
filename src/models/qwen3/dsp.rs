@@ -1,8 +1,11 @@
 //! Whisper-compatible frontend: periodic Hann, reflected STFT, Slaney mel scale.
-use candle_core::{Device, Result, Tensor};
+use crate::CancellationToken;
+use anyhow::Result;
+use candle_core::{Device, Tensor};
 use rustfft::{FftPlanner, num_complex::Complex};
 
-pub(super) fn mel(samples: &[f32]) -> Result<Tensor> {
+pub(super) fn mel(samples: &[f32], cancellation: &CancellationToken) -> Result<Tensor> {
+    cancellation.check()?;
     const FFT: usize = 400;
     const HOP: usize = 160;
     const BINS: usize = 128;
@@ -21,6 +24,7 @@ pub(super) fn mel(samples: &[f32]) -> Result<Tensor> {
     let mut buffer = vec![Complex::default(); FFT];
     let mut values = vec![0.0f32; BINS * frames];
     for frame in 0..frames {
+        cancellation.check()?;
         for (i, b) in buffer.iter_mut().enumerate() {
             let index = frame as isize * HOP as isize + i as isize - (FFT / 2) as isize;
             let reflected = if index < 0 {
@@ -50,7 +54,8 @@ pub(super) fn mel(samples: &[f32]) -> Result<Tensor> {
     for v in &mut values {
         *v = (v.max(floor) + 4.0) / 4.0;
     }
-    Tensor::from_vec(values, (BINS, frames), &Device::Cpu)
+    cancellation.check()?;
+    Ok(Tensor::from_vec(values, (BINS, frames), &Device::Cpu)?)
 }
 
 fn filters(bins: usize, frequencies: usize) -> Vec<f32> {
@@ -85,7 +90,7 @@ mod tests {
     #[test]
     fn silence_and_short_audio_are_finite() {
         for n in [1, 160, 16000] {
-            let m = mel(&vec![0.0; n]).unwrap();
+            let m = mel(&vec![0.0; n], &CancellationToken::default()).unwrap();
             assert_eq!(m.dims()[0], 128);
             assert!(
                 m.flatten_all()

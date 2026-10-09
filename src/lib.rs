@@ -4,6 +4,7 @@
 mod audio;
 #[cfg(feature = "download")]
 pub mod cache;
+mod cancellation;
 mod engine;
 /// Built-in optional model backends.
 pub mod models;
@@ -12,6 +13,7 @@ mod streaming;
 mod types;
 
 pub use audio::Audio;
+pub use cancellation::{CancellationToken, Cancelled};
 pub use engine::{AsrEngine, AsrModel};
 pub use output::JsonTranscriptWriter;
 pub use streaming::{AudioChunk, WavChunks};

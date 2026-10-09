@@ -140,6 +140,48 @@ to the selected registered instance. Backends receive the same normalized
 audio and return the same model-independent result types. Qwen is optional:
 `cargo check --no-default-features --lib` builds the core API alone.
 
+### Cancellation
+
+Keep a clone of the request's `CancellationToken` in the UI or controlling
+thread, and call `cancel()` to stop work:
+
+```rust
+use valle_asr::{CancellationToken, TranscribeOptions};
+
+let stop = CancellationToken::default();
+let options = TranscribeOptions {
+    cancellation: stop.clone(),
+    ..Default::default()
+};
+// Pass &options to the inference worker; keep stop in the controlling thread.
+stop.cancel();
+assert!(options.cancellation.is_cancelled());
+```
+
+`CancellationToken::from_shared_flag(Arc<AtomicBool>)` also accepts a host's
+existing stop flag without a monitoring thread. The flag must only transition
+from `false` to `true` during a request. Cancellation is permanent for all token
+clones; use a fresh token for the next request.
+
+Qwen checks cancellation while decoding/resampling WAV chunks, converting
+weights, computing mel frames, running encoder/decoder/classifier layers and
+generating tokens. Both ASR and alignment passes check the flag, so word
+transcription can stop before its first result callback. Standalone alignment
+can use `Qwen3::align_with_cancellation`; `align` retains its original behavior.
+
+A cancelled request returns an error identifiable with
+`error.is::<valle_asr::Cancelled>()`, including when error context is attached;
+it never reports successful partial output. Already delivered sink chunks
+cannot be retracted. Call a transactional output writer's `finish()` only after
+successful inference, and reuse the backend with a fresh token after cancellation.
+Custom backends must check the token during their own compute; the engine also
+checks before dispatch, around sink callbacks and before returning success.
+
+Cancellation is cooperative: a running tensor/CPU operator or blocking file
+operation finishes before the next checkpoint. Model constructors and downloads
+have no cancellation parameter. No fixed wall-clock cancellation latency is
+promised, and no extra polling thread is created by the library.
+
 ### Features
 
 - `qwen3`: the built-in Qwen3 CPU backend.
@@ -256,3 +298,4 @@ release action using the authorized crates.io owner account.
 - Bounded WAV chunking and streamed JSON for long files.
 - Revision-pinned, verified model downloads and permissively licensed sources.
 - Independent Linux, Windows and macOS CI with real-model and crate checks.
+- Shared host cancellation flags, typed cancellation errors and reusable backends.

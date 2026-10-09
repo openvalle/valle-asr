@@ -1,5 +1,5 @@
 use anyhow::Result;
-use valle_asr::{AsrEngine, AsrModel, Audio, ModelInfo, TranscribeOptions, Transcript};
+use valle_asr::{AsrEngine, AsrModel, Audio, Cancelled, ModelInfo, TranscribeOptions, Transcript};
 
 struct Backend(&'static str);
 impl AsrModel for Backend {
@@ -19,6 +19,49 @@ impl AsrModel for Backend {
             segments: vec![],
         })
     }
+}
+
+#[test]
+fn cancellation_rejects_pre_cancelled_and_late_success_and_allows_reuse() -> Result<()> {
+    struct CancellingBackend(bool);
+    impl AsrModel for CancellingBackend {
+        fn info(&self) -> ModelInfo {
+            Backend("cancel").info()
+        }
+        fn transcribe(&mut self, audio: &Audio, options: &TranscribeOptions) -> Result<Transcript> {
+            if self.0 {
+                self.0 = false;
+                options.cancellation.cancel();
+            }
+            Backend("cancel").transcribe(audio, options)
+        }
+    }
+    let mut engine = AsrEngine::new();
+    engine.register(CancellingBackend(true))?;
+    let audio = Audio::from_mono(vec![0.0; 1600], 16000)?;
+    let options = TranscribeOptions::default();
+    options.cancellation.cancel();
+    assert!(
+        engine
+            .transcribe("cancel", &audio, &options)
+            .unwrap_err()
+            .is::<Cancelled>()
+    );
+    // The rejected request never dispatched the backend: its first actual call
+    // still cancels inside inference, and cannot return a successful transcript.
+    assert!(
+        engine
+            .transcribe("cancel", &audio, &TranscribeOptions::default())
+            .unwrap_err()
+            .is::<Cancelled>()
+    );
+    assert_eq!(
+        engine
+            .transcribe("cancel", &audio, &TranscribeOptions::default())?
+            .text,
+        "cancel"
+    );
+    Ok(())
 }
 
 #[test]

@@ -9,7 +9,8 @@ pub trait AsrModel: Send {
     /// Return the backend identity and capabilities.
     fn info(&self) -> ModelInfo;
     /// Recognize in-memory audio. Segment and word times are relative to this input.
-    /// Backends must honor supported options and return errors for failed inference.
+    /// Backends must honor supported options, check `options.cancellation` during
+    /// inference, and return [`crate::Cancelled`] instead of partial success.
     fn transcribe(&mut self, audio: &Audio, options: &TranscribeOptions) -> Result<Transcript>;
 
     /// Process one complete WAV with bounded audio buffers, delivering results
@@ -20,10 +21,12 @@ pub trait AsrModel: Send {
         options: &TranscribeOptions,
         emit: &mut dyn FnMut(Segment) -> Result<()>,
     ) -> Result<TranscriptSummary> {
+        options.validate()?;
         let mut chunks = WavChunks::open(path, options.chunk_seconds)?;
         let mut summary = SummaryBuilder::new(self.info().id, chunks.duration_ms());
-        while let Some(chunk) = chunks.next_chunk()? {
+        while let Some(chunk) = chunks.next_chunk_with_cancellation(&options.cancellation)? {
             let result = self.transcribe(&chunk.audio, options)?;
+            options.cancellation.check()?;
             let segments = if result.segments.is_empty() {
                 vec![Segment {
                     text: result.text,
@@ -36,6 +39,7 @@ pub trait AsrModel: Send {
                 result.segments
             };
             for mut segment in segments {
+                options.cancellation.check()?;
                 ensure!(
                     segment.start_ms <= segment.end_ms
                         && segment.end_ms <= chunk.audio.duration_ms(),
@@ -49,8 +53,10 @@ pub trait AsrModel: Send {
                 }
                 summary.observe(&segment);
                 emit(segment)?;
+                options.cancellation.check()?;
             }
         }
+        options.cancellation.check()?;
         Ok(summary.finish())
     }
 }
@@ -90,17 +96,21 @@ impl AsrEngine {
     /// Recognize in-memory audio with the selected backend.
     ///
     /// # Errors
-    /// Rejects an unregistered model ID and propagates backend failures.
+    /// Rejects invalid options, cancellation and an unregistered model ID,
+    /// and propagates backend failures. Cancellation is [`crate::Cancelled`].
     pub fn transcribe(
         &mut self,
         model: &str,
         audio: &Audio,
         options: &TranscribeOptions,
     ) -> Result<Transcript> {
+        options.validate()?;
         let Some(backend) = self.models.get_mut(model) else {
             bail!("model is not registered: {model}")
         };
-        backend.transcribe(audio, options)
+        let result = backend.transcribe(audio, options)?;
+        options.cancellation.check()?;
+        Ok(result)
     }
 
     /// Stream a complete file through the selected backend. The caller decides
@@ -115,10 +125,18 @@ impl AsrEngine {
         options: &TranscribeOptions,
         emit: &mut dyn FnMut(Segment) -> Result<()>,
     ) -> Result<TranscriptSummary> {
+        options.validate()?;
         let Some(backend) = self.models.get_mut(model) else {
             bail!("model is not registered: {model}")
         };
-        backend.transcribe_file(path.as_ref(), options, emit)
+        let result = backend.transcribe_file(path.as_ref(), options, &mut |segment| {
+            options.cancellation.check()?;
+            emit(segment)?;
+            options.cancellation.check()?;
+            Ok(())
+        })?;
+        options.cancellation.check()?;
+        Ok(result)
     }
 }
 

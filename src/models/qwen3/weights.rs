@@ -1,4 +1,5 @@
 //! Convert mapped BF16 weights straight into their final CPU F32 storage.
+use crate::CancellationToken;
 use candle_core::{DType, Device, Error, Result, Shape, Tensor};
 use candle_nn::{Init, VarBuilder, var_builder::SimpleBackend};
 use memmap2::MmapOptions;
@@ -19,6 +20,7 @@ struct Weight {
 }
 
 struct CpuWeights {
+    cancellation: CancellationToken,
     shards: Vec<Shard>,
     weights: HashMap<String, Weight>,
 }
@@ -34,6 +36,7 @@ impl CpuWeights {
     }
 
     fn tensor(&self, name: &str, dtype: DType, device: &Device) -> Result<Tensor> {
+        self.cancellation.check().map_err(Error::wrap)?;
         let info = self.info(name)?;
         if info.bytes == 0 {
             return Tensor::zeros(info.shape.clone(), dtype, device);
@@ -55,11 +58,10 @@ impl CpuWeights {
         {
             // Safetensors stores little-endian data. Reading bytes avoids
             // alignment assumptions and an intermediate owned BF16 tensor.
-            let values: Vec<f32> = mapped
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|bytes| {
+            let mut values = Vec::with_capacity(info.bytes / 2);
+            for block in mapped.as_chunks::<2>().0.chunks(65_536) {
+                self.cancellation.check().map_err(Error::wrap)?;
+                values.extend(block.iter().map(|bytes| {
                     let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
                     // Match half/Candle's quiet-NaN conversion as well.
                     let bits = if bits & 0x7fff > 0x7f80 {
@@ -68,8 +70,9 @@ impl CpuWeights {
                         bits
                     };
                     f32::from_bits(u32::from(bits) << 16)
-                })
-                .collect();
+                }));
+            }
+            self.cancellation.check().map_err(Error::wrap)?;
             Tensor::from_vec(values, info.shape.clone(), device)
         } else {
             Tensor::from_raw_buffer(
@@ -113,12 +116,18 @@ impl SimpleBackend for CpuWeights {
     }
 }
 
-pub(super) fn load(paths: &[PathBuf]) -> Result<VarBuilder<'static>> {
+pub(super) fn load(
+    paths: &[PathBuf],
+    cancellation: &CancellationToken,
+) -> Result<VarBuilder<'static>> {
+    cancellation.check().map_err(Error::wrap)?;
     let mut backend = CpuWeights {
+        cancellation: cancellation.clone(),
         shards: Vec::new(),
         weights: HashMap::new(),
     };
     for path in paths {
+        cancellation.check().map_err(Error::wrap)?;
         let file = File::open(path).map_err(|e| Error::from(e).with_path(path))?;
         // SAFETY: cache files are immutable; keeping this handle also makes
         // later tensor windows consistent across an atomic path replacement.
@@ -181,7 +190,7 @@ mod tests {
         let data: Vec<_> = (0..=u16::MAX).flat_map(u16::to_le_bytes).collect();
         let file = safetensor("weight", "BF16", &[256, 256], &data);
         let paths = [file.path().to_path_buf()];
-        let fused = load(&paths)?.get((256, 256), "weight")?;
+        let fused = load(&paths, &CancellationToken::default())?.get((256, 256), "weight")?;
         // Independent existing loader verifies zeros, subnormals, infinities,
         // NaNs and normal values, not just the values in one model checkpoint.
         let reference = unsafe { MmapedSafetensors::multi(&paths)? }
@@ -206,7 +215,10 @@ mod tests {
             .flat_map(f32::to_le_bytes)
             .collect();
         let second = safetensor("other", "F32", &[2], &data);
-        let vb = load(&[first.path().to_path_buf(), second.path().to_path_buf()])?;
+        let vb = load(
+            &[first.path().to_path_buf(), second.path().to_path_buf()],
+            &CancellationToken::default(),
+        )?;
         assert_eq!(
             vb.pp("block").get(2, "weight")?.to_vec1::<f32>()?,
             [1.0, -2.0]
@@ -224,7 +236,7 @@ mod tests {
     fn empty_tensors_and_truncated_payloads() -> Result<()> {
         let empty = safetensor("weight", "BF16", &[0], &[]);
         assert_eq!(
-            load(&[empty.path().to_path_buf()])?
+            load(&[empty.path().to_path_buf()], &CancellationToken::default())?
                 .get(0, "weight")?
                 .dims(),
             [0]
@@ -232,7 +244,26 @@ mod tests {
         let truncated = safetensor("weight", "BF16", &[2], &[0x80, 0x3f, 0x00, 0xc0]);
         let length = truncated.as_file().metadata()?.len();
         truncated.as_file().set_len(length - 1)?;
-        assert!(load(&[truncated.path().to_path_buf()]).is_err());
+        assert!(
+            load(
+                &[truncated.path().to_path_buf()],
+                &CancellationToken::default()
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_after_metadata_stops_tensor_loading() -> Result<()> {
+        let file = safetensor("weight", "BF16", &[1], &[0x80, 0x3f]);
+        let token = CancellationToken::default();
+        let vb = load(&[file.path().to_path_buf()], &token)?;
+        token.cancel();
+        assert!(vb.get(1, "weight").is_err());
+        assert!(load(&[PathBuf::from("does-not-exist")], &token).is_err());
+        let vb = load(&[file.path().to_path_buf()], &CancellationToken::default())?;
+        assert_eq!(vb.get(1, "weight")?.to_vec1::<f32>()?, [1.0]);
         Ok(())
     }
 }

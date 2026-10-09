@@ -3,9 +3,13 @@
 #![cfg(all(feature = "qwen3", feature = "download"))]
 use anyhow::{Context, Result, ensure};
 mod support;
-use std::{path::Path, time::Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 use valle_asr::{
-    AsrModel, Audio, JsonTranscriptWriter, TranscribeOptions, Transcript,
+    AsrModel, Audio, CancellationToken, Cancelled, JsonTranscriptWriter, TranscribeOptions,
+    Transcript,
     cache::{ModelCache, builtin_model},
     models::qwen3::Qwen3,
 };
@@ -89,6 +93,32 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
     let aligner = cache.ensure(&builtin_model("qwen3-forced-aligner-0.6b")?, true)?;
     let mut backend = Qwen3::load("qwen3-asr-0.6b", model, Some(aligner))?;
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    // Cancel before the first word-timestamp sink callback can run. The file
+    // API must stop during its ASR pass, rather than waiting for all recognition
+    // and the start of the second, alignment pass. A fresh request below also
+    // proves that cancelled lazy loading/inference does not poison the backend.
+    let token = CancellationToken::default();
+    let options = TranscribeOptions {
+        cancellation: token.clone(),
+        ..Default::default()
+    };
+    let mut callbacks = 0;
+    let cancelled = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            token.cancel();
+        });
+        backend.transcribe_file(&fixtures.join("sample5.wav"), &options, &mut |_| {
+            callbacks += 1;
+            Ok(())
+        })
+    })
+    .unwrap_err();
+    ensure!(
+        cancelled.is::<Cancelled>() && callbacks == 0,
+        "first-pass cancellation was delayed until the result sink: {cancelled}"
+    );
+    eprintln!("[test] first ASR pass cancelled without waiting for a result callback");
     let mut receipts = Vec::new();
     for (name, lang, threshold) in [("sample1", "en", 0.10), ("sample5", "zh", 0.20)] {
         let reference = std::fs::read_to_string(fixtures.join(format!("{name}.txt")))?;
@@ -128,6 +158,25 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
     // Two copies in separate chunks verify that the second set of learned local
     // timestamps is offset into the original source timeline.
     let single = Audio::from_wav(fixtures.join("sample1.wav"))?;
+    let align_token = CancellationToken::default();
+    let reference = std::fs::read_to_string(fixtures.join("sample1.txt"))?;
+    let cancelled = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(10));
+            align_token.cancel();
+        });
+        backend.align_with_cancellation(&single, &reference, "English", &align_token)
+    })
+    .unwrap_err();
+    ensure!(
+        cancelled.is::<Cancelled>(),
+        "alignment cancellation lost its error type: {cancelled}"
+    );
+    ensure!(
+        !backend.align(&single, &reference, "English")?.is_empty(),
+        "aligner was not reusable after cancellation"
+    );
+    eprintln!("[test] alignment cancelled and the resident aligner successfully reused");
     let mut samples = single.samples().to_vec();
     samples.resize(4 * 16000, 0.0);
     samples.extend_from_slice(single.samples());

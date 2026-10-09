@@ -1,4 +1,4 @@
-use crate::Audio;
+use crate::{Audio, CancellationToken};
 use anyhow::{Context, Result, ensure};
 use hound::{Sample, SampleFormat, WavReader, WavSpec};
 use std::{
@@ -127,6 +127,14 @@ impl WavChunks {
     /// # Errors
     /// Returns an error for read/seek failures or invalid PCM samples.
     pub fn next_chunk(&mut self) -> Result<Option<AudioChunk>> {
+        self.next_chunk_with_cancellation(&CancellationToken::default())
+    }
+
+    pub(crate) fn next_chunk_with_cancellation(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<AudioChunk>> {
+        cancellation.check()?;
         if self.position == self.total_samples {
             return Ok(None);
         }
@@ -146,7 +154,10 @@ impl WavChunks {
         self.input.seek(SeekFrom::Start(offset))?;
         let mut raw = Vec::with_capacity((last - first + 1) as usize);
         let scale = 2f64.powi(i32::from(self.spec.bits_per_sample) - 1);
-        for _ in first..=last {
+        for frame in first..=last {
+            if (frame - first).is_multiple_of(1024) {
+                cancellation.check()?;
+            }
             let mut sum = 0.0;
             for _ in 0..self.spec.channels {
                 let sample = match self.spec.sample_format {
@@ -178,6 +189,9 @@ impl WavChunks {
         } else {
             let mut normalized = Vec::with_capacity(count);
             for index in self.position..self.position + count as u64 {
+                if (index - self.position).is_multiple_of(1024) {
+                    cancellation.check()?;
+                }
                 let numerator = index * source_rate;
                 let center = (numerator / target_rate) as i64;
                 let phase = (numerator % target_rate) as u32;
@@ -197,6 +211,7 @@ impl WavChunks {
         if self.position + (count as u64) < self.total_samples {
             samples.truncate(quiet_cut(&samples));
         }
+        cancellation.check()?;
         let start_sample = self.position;
         self.position += samples.len() as u64;
         Ok(Some(AudioChunk {

@@ -156,6 +156,7 @@ fn main() -> Result<()> {
                     chunk_seconds,
                     max_new_tokens,
                     context,
+                    ..Default::default()
                 };
                 if let Some(output) = output {
                     let parent = output

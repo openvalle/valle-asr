@@ -11,11 +11,53 @@ use std::{
 use support::{sparse_wav, write_pcm};
 use tempfile::{NamedTempFile, tempdir};
 use valle_asr::{
-    AsrEngine, AsrModel, Audio, JsonTranscriptWriter, ModelInfo, Segment, TranscribeOptions,
-    Transcript, TranscriptSummary, WavChunks, Word,
+    AsrEngine, AsrModel, Audio, Cancelled, JsonTranscriptWriter, ModelInfo, Segment,
+    TranscribeOptions, Transcript, TranscriptSummary, WavChunks, Word,
 };
 
 struct CountingBackend(Arc<AtomicUsize>);
+
+#[test]
+fn cancellation_from_last_sink_is_not_reported_as_success() -> Result<()> {
+    let mut input = NamedTempFile::new()?;
+    sparse_wav(input.as_file_mut(), 1)?;
+    let mut engine = AsrEngine::new();
+    engine.register(CountingBackend(Arc::new(AtomicUsize::new(0))))?;
+    let options = TranscribeOptions::default();
+    let mut callbacks = 0;
+    let error = engine
+        .transcribe_file("counter", input.path(), &options, &mut |_| {
+            callbacks += 1;
+            options.cancellation.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(error.is::<Cancelled>());
+    assert_eq!(callbacks, 1);
+    let summary = engine.transcribe_file(
+        "counter",
+        input.path(),
+        &TranscribeOptions::default(),
+        &mut |_| Ok(()),
+    )?;
+    assert_eq!(summary.segment_count, 1);
+    Ok(())
+}
+
+#[test]
+fn pre_cancelled_file_does_not_open_input_or_emit() -> Result<()> {
+    let mut engine = AsrEngine::new();
+    engine.register(CountingBackend(Arc::new(AtomicUsize::new(0))))?;
+    let options = TranscribeOptions::default();
+    options.cancellation.cancel();
+    let error = engine
+        .transcribe_file("counter", "missing.wav", &options, &mut |_| {
+            panic!("cancelled output emitted")
+        })
+        .unwrap_err();
+    assert!(error.is::<Cancelled>());
+    Ok(())
+}
 impl AsrModel for CountingBackend {
     fn info(&self) -> ModelInfo {
         ModelInfo {

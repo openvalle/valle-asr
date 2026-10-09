@@ -7,7 +7,8 @@ mod text;
 mod weights;
 
 use crate::{
-    AsrModel, Audio, ModelInfo, Segment, TimestampMode, TranscribeOptions, Transcript, Word,
+    AsrModel, Audio, CancellationToken, ModelInfo, Segment, TimestampMode, TranscribeOptions,
+    Transcript, Word,
 };
 use anyhow::{Context, Result, bail, ensure};
 use candle_core::Tensor;
@@ -77,7 +78,8 @@ impl Qwen3 {
         self.resident = None;
     }
 
-    fn session(&mut self, kind: Kind) -> Result<&Network> {
+    fn session(&mut self, kind: Kind, cancellation: &CancellationToken) -> Result<&Network> {
+        cancellation.check()?;
         if self
             .resident
             .as_ref()
@@ -91,8 +93,11 @@ impl Qwen3 {
                     .as_ref()
                     .context("word timestamps require a Qwen3-ForcedAligner model")?,
             };
-            let network =
-                Network::load(path).with_context(|| format!("load {}", path.display()))?;
+            let loaded = Network::load(path, cancellation);
+            // Candle weight errors erase their inner type; preserve our public
+            // cancellation marker when a loading checkpoint aborted the request.
+            cancellation.check()?;
+            let network = loaded.with_context(|| format!("load {}", path.display()))?;
             ensure!(
                 (kind == Kind::Aligner) == network.config.thinker_config.classify_num.is_some(),
                 "incorrect model kind"
@@ -107,9 +112,10 @@ impl Qwen3 {
         samples: &[f32],
         options: &TranscribeOptions,
     ) -> Result<(String, String)> {
+        options.cancellation.check()?;
         let tok = Arc::clone(&self.asr_tokenizer);
-        let network = self.session(Kind::Asr)?;
-        let audio = network.audio(samples)?;
+        let network = self.session(Kind::Asr, &options.cancellation)?;
+        let audio = network.audio(samples, &options.cancellation)?;
         let c = &network.config.thinker_config;
         let mut ids = text::encode(
             &tok,
@@ -131,9 +137,10 @@ impl Qwen3 {
         }
         let x = splice(network, &ids, audio_start, &audio)?;
         let mut cache = network.cache();
-        let mut logits = network.decode(&x, 0, &mut cache, true)?;
+        let mut logits = network.decode(&x, 0, &mut cache, true, &options.cancellation)?;
         let mut output = Vec::new();
         for step in 0..options.max_new_tokens {
+            options.cancellation.check()?;
             let next = logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?;
             if [151643, 151645].contains(&next) {
                 let decoded = tok
@@ -143,8 +150,13 @@ impl Qwen3 {
             }
             output.push(next);
             if step + 1 < options.max_new_tokens {
-                logits =
-                    network.decode(&network.embed(&[next])?, ids.len() + step, &mut cache, true)?;
+                logits = network.decode(
+                    &network.embed(&[next])?,
+                    ids.len() + step,
+                    &mut cache,
+                    true,
+                    &options.cancellation,
+                )?;
             }
         }
         bail!(
@@ -161,11 +173,30 @@ impl Qwen3 {
     /// Rejects clips over 30 seconds, unsupported alignment languages, missing
     /// aligner weights, and failed model loading or inference.
     pub fn align(&mut self, audio: &Audio, transcript: &str, language: &str) -> Result<Vec<Word>> {
+        self.align_with_cancellation(audio, transcript, language, &CancellationToken::default())
+    }
+
+    /// Align a known transcript with cooperative cancellation, including model loading.
+    /// Checks occur between preprocessing steps and encoder/classifier layers.
+    ///
+    /// # Errors
+    /// Returns [`crate::Cancelled`] on cancellation, or the same validation,
+    /// loading and inference errors as [`Self::align`].
+    pub fn align_with_cancellation(
+        &mut self,
+        audio: &Audio,
+        transcript: &str,
+        language: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<Word>> {
+        cancellation.check()?;
         ensure!(
             audio.samples().len() <= 30 * Audio::SAMPLE_RATE as usize,
             "alignment clips must be at most 30 seconds"
         );
-        self.align_chunk(audio.samples(), transcript, language)
+        let words = self.align_chunk(audio.samples(), transcript, language, cancellation)?;
+        cancellation.check()?;
+        Ok(words)
     }
 
     fn align_chunk(
@@ -173,7 +204,9 @@ impl Qwen3 {
         samples: &[f32],
         transcript: &str,
         language: &str,
+        cancellation: &CancellationToken,
     ) -> Result<Vec<Word>> {
+        cancellation.check()?;
         if transcript.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -192,7 +225,7 @@ impl Qwen3 {
             .aligner_tokenizer
             .clone()
             .context("word timestamps require an aligner tokenizer")?;
-        let network = self.session(Kind::Aligner)?;
+        let network = self.session(Kind::Aligner, cancellation)?;
         ensure!(
             network
                 .config
@@ -209,7 +242,7 @@ impl Qwen3 {
             .config
             .timestamp_segment_time
             .context("aligner has no timestamp resolution")?;
-        let audio = network.audio(samples)?;
+        let audio = network.audio(samples, cancellation)?;
         let c = &network.config.thinker_config;
         let mut ids = vec![c.audio_start_token_id];
         let audio_start = ids.len();
@@ -217,6 +250,7 @@ impl Qwen3 {
         ids.push(c.audio_end_token_id);
         let mut positions = Vec::with_capacity(words.len() * 2);
         for word in &words {
+            cancellation.check()?;
             ids.extend(text::encode(&tok, word)?);
             positions.push(u32::try_from(ids.len())?);
             ids.push(timestamp);
@@ -225,13 +259,14 @@ impl Qwen3 {
         }
         let x = splice(network, &ids, audio_start, &audio)?;
         let timestamps: Vec<_> = network
-            .classify_positions(&x, &positions)?
+            .classify_positions(&x, &positions, cancellation)?
             .squeeze(0)?
             .argmax(1)?
             .to_vec1::<u32>()?
             .into_iter()
             .map(|index| u64::from(index) * tick)
             .collect();
+        cancellation.check()?;
         let timestamps = text::repair_timestamps(&timestamps);
         let duration = (samples.len() as u64 * 1000).div_ceil(u64::from(Audio::SAMPLE_RATE));
         Ok(words
@@ -277,14 +312,7 @@ impl AsrModel for Qwen3 {
     }
 
     fn transcribe(&mut self, audio: &Audio, options: &TranscribeOptions) -> Result<Transcript> {
-        ensure!(
-            (1..=30).contains(&options.chunk_seconds),
-            "chunk_seconds must be 1..=30"
-        );
-        ensure!(
-            options.max_new_tokens > 0,
-            "max_new_tokens must be positive"
-        );
+        options.validate()?;
         if options.timestamps == TimestampMode::Word {
             ensure!(
                 self.aligner_dir.is_some(),
@@ -316,7 +344,12 @@ impl AsrModel for Qwen3 {
                 let samples = &audio.samples()
                     [index * chunk_size..((index + 1) * chunk_size).min(audio.samples().len())];
                 segment.words = self
-                    .align_chunk(samples, &segment.text, &segment.language)
+                    .align_chunk(
+                        samples,
+                        &segment.text,
+                        &segment.language,
+                        &options.cancellation,
+                    )
                     .with_context(|| format!("align chunk {index}"))?;
                 for word in &mut segment.words {
                     word.start_ms += segment.start_ms;
@@ -341,6 +374,7 @@ impl AsrModel for Qwen3 {
             .filter(|t| !t.is_empty())
             .collect::<Vec<_>>()
             .join(separator);
+        options.cancellation.check()?;
         Ok(Transcript {
             model: self.id.clone(),
             text,

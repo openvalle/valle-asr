@@ -1,6 +1,7 @@
 //! Native Candle inference, following the official Apache-2.0 Qwen architecture.
 //! See THIRD_PARTY.md for the pinned architecture and Rust reference sources.
 use super::config::{AudioConfig, Config, TextConfig};
+use crate::CancellationToken;
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{
@@ -127,11 +128,13 @@ impl Encoder {
             window_frames: c.n_window_infer,
         })
     }
-    fn forward(&self, mel: &Tensor) -> Result<Tensor> {
+    fn forward(&self, mel: &Tensor, cancellation: &CancellationToken) -> Result<Tensor> {
+        cancellation.check()?;
         let frames = mel.dim(1)?;
         let mut outputs = Vec::new();
         // Each attention window is independent. Execute it separately to bound RAM.
         for start in (0..frames).step_by(self.window_frames) {
+            cancellation.check()?;
             let end = (start + self.window_frames).min(frames);
             let mut stems = Vec::new();
             for chunk in (start..end).step_by(100) {
@@ -140,6 +143,7 @@ impl Encoder {
                 let pad = Tensor::zeros((128, 100 - count), DType::F32, &Device::Cpu)?;
                 let mut x = Tensor::cat(&[part, pad], 1)?.unsqueeze(0)?.unsqueeze(0)?;
                 for conv in &self.conv {
+                    cancellation.check()?;
                     x = conv.forward(&x)?.gelu_erf()?;
                 }
                 let (b, c, f, t) = x.dims4()?;
@@ -155,13 +159,16 @@ impl Encoder {
             }
             let mut x = Tensor::cat(&stems, 1)?;
             for layer in &self.layers {
+                cancellation.check()?;
                 x = layer.forward(&x)?;
             }
+            cancellation.check()?;
             let x = self
                 .proj2
                 .forward(&self.proj1.forward(&self.norm.forward(&x)?)?.gelu_erf()?)?;
             outputs.push(x.squeeze(0)?);
         }
+        cancellation.check()?;
         Ok(Tensor::cat(&outputs, 0)?)
     }
 }
@@ -279,7 +286,8 @@ pub(super) struct Network {
     head: Linear,
 }
 impl Network {
-    pub fn load(root: &Path) -> Result<Self> {
+    pub fn load(root: &Path, cancellation: &CancellationToken) -> Result<Self> {
+        cancellation.check()?;
         let config: Config = serde_json::from_slice(&std::fs::read(root.join("config.json"))?)?;
         config.validate()?;
         let index = root.join("model.safetensors.index.json");
@@ -301,7 +309,7 @@ impl Network {
         } else {
             vec![root.join("model.safetensors")]
         };
-        let vb = super::weights::load(&paths)?;
+        let vb = super::weights::load(&paths, cancellation)?;
         let t = &config.thinker_config.text_config;
         let text = vb.pp("thinker.model");
         let embedding = text.get((t.vocab_size, t.hidden_size), "embed_tokens.weight")?;
@@ -321,15 +329,19 @@ impl Network {
             )?,
             embedding,
             layers: (0..t.num_hidden_layers)
-                .map(|i| TextLayer::load(text.pp(format!("layers.{i}")), t))
+                .map(|i| {
+                    cancellation.check()?;
+                    TextLayer::load(text.pp(format!("layers.{i}")), t)
+                })
                 .collect::<Result<_>>()?,
             norm: rms_norm(t.hidden_size, t.rms_norm_eps, text.pp("norm"))?,
             head,
             config,
         })
     }
-    pub fn audio(&self, samples: &[f32]) -> Result<Tensor> {
-        self.encoder.forward(&super::dsp::mel(samples)?)
+    pub fn audio(&self, samples: &[f32], cancellation: &CancellationToken) -> Result<Tensor> {
+        self.encoder
+            .forward(&super::dsp::mel(samples, cancellation)?, cancellation)
     }
     pub fn embed(&self, ids: &[u32]) -> Result<Tensor> {
         Ok(self
@@ -346,8 +358,10 @@ impl Network {
         offset: usize,
         cache: &mut Cache,
         last_only: bool,
+        cancellation: &CancellationToken,
     ) -> Result<Tensor> {
-        let h = self.forward_hidden(x, offset, Some(cache))?;
+        let h = self.forward_hidden(x, offset, Some(cache), cancellation)?;
+        cancellation.check()?;
         let h = if last_only {
             h.i((.., h.dim(1)? - 1.., ..))?
         } else {
@@ -358,8 +372,14 @@ impl Network {
 
     /// Alignment is one full-context forward, without retaining layer KV.
     /// Only timestamp rows need normalization and the classifier projection.
-    pub fn classify_positions(&self, x: &Tensor, positions: &[u32]) -> Result<Tensor> {
-        let h = self.forward_hidden(x, 0, None)?;
+    pub fn classify_positions(
+        &self,
+        x: &Tensor,
+        positions: &[u32],
+        cancellation: &CancellationToken,
+    ) -> Result<Tensor> {
+        let h = self.forward_hidden(x, 0, None, cancellation)?;
+        cancellation.check()?;
         let h = h.index_select(&Tensor::new(positions, &Device::Cpu)?, 1)?;
         Ok(self.head.forward(&self.norm.forward(&h)?)?)
     }
@@ -369,7 +389,9 @@ impl Network {
         x: &Tensor,
         offset: usize,
         mut cache: Option<&mut Cache>,
+        cancellation: &CancellationToken,
     ) -> Result<Tensor> {
+        cancellation.check()?;
         let seq = x.dim(1)?;
         let t = &self.config.thinker_config.text_config;
         ensure!(
@@ -381,6 +403,7 @@ impl Network {
         let mut cos = Vec::with_capacity(seq * t.head_dim);
         let mut sin = Vec::with_capacity(seq * t.head_dim);
         for pos in offset..offset + seq {
+            cancellation.check()?;
             for _ in 0..2 {
                 for i in 0..t.head_dim / 2 {
                     let phase = pos as f64 / t.rope_theta.powf(2.0 * i as f64 / t.head_dim as f64);
@@ -394,26 +417,28 @@ impl Network {
         let sin = Tensor::from_vec(sin, shape, &Device::Cpu)?;
         let mask = if seq > 1 {
             let total = seq + offset;
-            let data = (0..seq)
-                .flat_map(|i| {
-                    (0..total).map(move |j| {
-                        if j > offset + i {
-                            f32::NEG_INFINITY
-                        } else {
-                            0.0
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
+            let mut data = Vec::with_capacity(seq * total);
+            for i in 0..seq {
+                cancellation.check()?;
+                data.extend((0..total).map(|j| {
+                    if j > offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                }));
+            }
             Some(Tensor::from_vec(data, (1, 1, seq, total), &Device::Cpu)?)
         } else {
             None
         };
         let mut h = x.clone();
         for (index, layer) in self.layers.iter().enumerate() {
+            cancellation.check()?;
             let kv = cache.as_deref_mut().map(|cache| &mut cache[index]);
             h = layer.forward(&h, &cos, &sin, kv, mask.as_ref())?;
         }
+        cancellation.check()?;
         Ok(h)
     }
 }

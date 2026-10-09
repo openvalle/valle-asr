@@ -56,10 +56,7 @@ impl Qwen3 {
         options: &TranscribeOptions,
         emit: &mut dyn FnMut(Segment) -> Result<()>,
     ) -> Result<TranscriptSummary> {
-        ensure!(
-            options.max_new_tokens > 0,
-            "max_new_tokens must be positive"
-        );
+        options.validate()?;
         if options.timestamps == TimestampMode::Word {
             ensure!(
                 self.aligner_dir.is_some(),
@@ -69,10 +66,12 @@ impl Qwen3 {
         let mut chunks = WavChunks::open(path, options.chunk_seconds)?;
         let mut summary = SummaryBuilder::new(self.id.clone(), chunks.duration_ms());
         if options.timestamps == TimestampMode::None {
-            while let Some(chunk) = chunks.next_chunk()? {
+            while let Some(chunk) = chunks.next_chunk_with_cancellation(&options.cancellation)? {
                 let segment = self.file_segment(&chunk, options)?;
                 summary.observe(&segment);
+                options.cancellation.check()?;
                 emit(segment)?;
+                options.cancellation.check()?;
             }
             return Ok(summary.finish());
         }
@@ -82,7 +81,7 @@ impl Qwen3 {
         let mut spool = NamedTempFile::new()?;
         {
             let mut records = BufWriter::new(spool.as_file_mut());
-            while let Some(chunk) = chunks.next_chunk()? {
+            while let Some(chunk) = chunks.next_chunk_with_cancellation(&options.cancellation)? {
                 let segment = self.file_segment(&chunk, options)?;
                 summary.observe(&segment);
                 let record = PendingSegment {
@@ -95,6 +94,7 @@ impl Qwen3 {
             }
             records.flush()?;
         }
+        options.cancellation.check()?;
         self.unload();
         chunks.rewind();
         spool.as_file_mut().seek(SeekFrom::Start(0))?;
@@ -103,7 +103,7 @@ impl Qwen3 {
         for record in records {
             let mut record = record?;
             let chunk = chunks
-                .next_chunk()?
+                .next_chunk_with_cancellation(&options.cancellation)?
                 .context("WAV changed between ASR and alignment passes")?;
             ensure!(
                 chunk.start_sample == record.start_sample
@@ -117,6 +117,7 @@ impl Qwen3 {
                     &chunk.audio.samples()[bounds],
                     &record.segment.text,
                     &record.segment.language,
+                    &options.cancellation,
                 )?;
                 offset
             } else {
@@ -126,12 +127,17 @@ impl Qwen3 {
                 word.start_ms = (word.start_ms + offset_ms).min(record.segment.end_ms);
                 word.end_ms = (word.end_ms + offset_ms).min(record.segment.end_ms);
             }
+            options.cancellation.check()?;
             emit(record.segment)?;
+            options.cancellation.check()?;
         }
         ensure!(
-            chunks.next_chunk()?.is_none(),
+            chunks
+                .next_chunk_with_cancellation(&options.cancellation)?
+                .is_none(),
             "WAV grew between ASR and alignment passes"
         );
+        options.cancellation.check()?;
         Ok(summary.finish())
     }
 }
