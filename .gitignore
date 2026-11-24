@@ -3,3 +3,4 @@
 /artifacts/
 *.part
 __pycache__/
+.DS_Store
