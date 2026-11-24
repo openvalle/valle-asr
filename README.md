@@ -96,6 +96,18 @@ writes each segment to its JSON output as it arrives. Processing time grows
 with duration. `--output` replaces the destination only after successful
 completion.
 
+Tokenizers remain in memory. A bounded resident cache holds one neural model:
+all ASR chunks run before the weights are released and all alignment chunks
+run. Repeated text-only transcription and standalone alignment reuse their
+resident model; full transcription switches models once per stage. This
+avoids retaining both sets of F32 weights on small CI runners. `Qwen3::unload`
+releases the resident model explicitly.
+
+The 0.6B models' F32 weights take 2.9 GiB for ASR and 3.4 GiB for the aligner.
+On macOS arm64 the CLI peaks at about 3.5 GB for text only and 4.9 GB with
+word timestamps. The difference beyond the aligner's weights is freed ASR
+memory that the system allocator keeps for reuse; it is not leaked.
+
 The CLI's WAV reader supports standard RIFF WAV, whose 32-bit size fields impose
 an approximately 4 GiB container limit (about 37 hours for 16 kHz mono PCM16).
 RF64 and compressed media are not decoded here.
@@ -218,13 +230,6 @@ directory and cross-process writer lock. Existing files are reused only after
 size and SHA-256 validation; interrupted `.part` files are never treated as
 models. Downloads are verified before a final rename. Revisions are immutable
 while model files are mapped. Do not modify a directory being used for inference.
-
-Tokenizers remain in memory. A bounded resident cache holds one neural model:
-all ASR chunks run before the weights are released and all alignment chunks
-run. Repeated text-only transcription and standalone alignment reuse their
-resident model; full transcription switches models once per stage. This
-avoids retaining both sets of F32 weights on small CI runners. `Qwen3::unload`
-releases the resident model explicitly.
 
 GitHub Actions caches Cargo dependencies/builds per OS and CPU architecture
 and shares the revision-pinned model cache across platforms. Model cache keys include the
