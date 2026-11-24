@@ -4,12 +4,7 @@ use crate::{
     engine::SummaryBuilder,
 };
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
-use std::{
-    io::{BufReader, BufWriter, Seek, SeekFrom, Write},
-    path::Path,
-};
-use tempfile::NamedTempFile;
+use std::path::Path;
 
 fn audible_bounds(samples: &[f32]) -> Option<std::ops::Range<usize>> {
     let start = samples.iter().position(|sample| *sample != 0.0)?;
@@ -17,7 +12,6 @@ fn audible_bounds(samples: &[f32]) -> Option<std::ops::Range<usize>> {
     Some(start..end)
 }
 
-#[derive(Serialize, Deserialize)]
 struct PendingSegment {
     start_sample: u64,
     samples: usize,
@@ -76,32 +70,23 @@ impl Qwen3 {
             return Ok(summary.finish());
         }
 
-        // Store text and interval metadata, never audio or model tensors. This
-        // keeps both model residency and transcript RAM independent of duration.
-        let mut spool = NamedTempFile::new()?;
-        {
-            let mut records = BufWriter::new(spool.as_file_mut());
-            while let Some(chunk) = chunks.next_chunk_with_cancellation(&options.cancellation)? {
-                let segment = self.file_segment(&chunk, options)?;
-                summary.observe(&segment);
-                let record = PendingSegment {
-                    start_sample: chunk.start_sample,
-                    samples: chunk.audio.samples().len(),
-                    segment,
-                };
-                serde_json::to_writer(&mut records, &record)?;
-                records.write_all(b"\n")?;
-            }
-            records.flush()?;
+        // Keep each chunk's interval and text, never its audio or model tensors.
+        // The text of a chunk is a few hundred bytes, so two hours of speech
+        // holds well under a megabyte here while the audio is read again.
+        let mut records = Vec::new();
+        while let Some(chunk) = chunks.next_chunk_with_cancellation(&options.cancellation)? {
+            let segment = self.file_segment(&chunk, options)?;
+            summary.observe(&segment);
+            records.push(PendingSegment {
+                start_sample: chunk.start_sample,
+                samples: chunk.audio.samples().len(),
+                segment,
+            });
         }
         options.cancellation.check()?;
         self.unload();
         chunks.rewind();
-        spool.as_file_mut().seek(SeekFrom::Start(0))?;
-        let records = serde_json::Deserializer::from_reader(BufReader::new(spool.as_file_mut()))
-            .into_iter::<PendingSegment>();
-        for record in records {
-            let mut record = record?;
+        for mut record in records {
             let chunk = chunks
                 .next_chunk_with_cancellation(&options.cancellation)?
                 .context("WAV changed between ASR and alignment passes")?;
