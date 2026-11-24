@@ -5,18 +5,16 @@ mod audio;
 #[cfg(feature = "download")]
 pub mod cache;
 mod cancellation;
+#[cfg(feature = "qwen3")]
+mod chunks;
 mod engine;
 /// Built-in optional model backends.
 pub mod models;
-mod output;
-mod streaming;
 mod types;
 
-pub use audio::Audio;
+pub use audio::{AudioSource, SAMPLE_RATE};
 pub use cancellation::{CancellationToken, Cancelled};
 pub use engine::{AsrEngine, AsrModel};
-pub use output::JsonTranscriptWriter;
-pub use streaming::{AudioChunk, WavChunks};
 pub use types::{
     ModelInfo, Segment, TimestampMode, TranscribeOptions, Transcript, TranscriptSummary, Word,
 };

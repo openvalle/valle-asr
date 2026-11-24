@@ -19,12 +19,13 @@ word timestamps. The first backend is **Qwen3-ASR**, paired with
 - Built-in official Qwen3-ASR 0.6B and ForcedAligner 0.6B downloads. Local
   directories can also load the matching original Qwen3-ASR 1.7B architecture;
   1.7B has not yet been included in the validation matrix.
-- Mono/stereo integer/float WAV input, converted to mono 16 kHz with low-pass
-  resampling. Applications can pass PCM directly. Other media can be decoded
-  by the consumer, including Valle's existing FFmpeg integration.
-- Complete WAV files are decoded and transcribed in bounded chunks, with
-  silence-aware boundaries. Audio and transcript RAM do not grow with duration
-  when using the file API/CLI. Word timestamps retain the original timeline.
+- The library takes mono 16 kHz f32 samples and returns segments with word
+  timestamps. Decoding media is left to the caller, such as Valle's FFmpeg
+  integration. The CLI reads mono/stereo integer/float WAV and resamples it
+  to 16 kHz with a low-pass filter.
+- Audio of any length is transcribed in bounded chunks with silence-aware
+  boundaries. A source that reads samples on demand keeps audio RAM from
+  growing with duration. Word timestamps keep the original timeline.
 - Pluggable model interface: applications register models and select by ID.
   Adding a model family does not change the shared transcript schema.
 
@@ -63,15 +64,15 @@ aligner return an explicit error when word timestamps are requested.
 ## Long files and memory
 
 Submit a complete file with the same `transcribe ... --output transcript.json`
-command. There is no ASR file-duration limit. The decoder reads at most the
-current chunk plus resampling neighbors, mixes channels during reading, and
-preserves the global resampling phase across boundaries. A 30-second normalized
-16 kHz chunk contains 1,920,000 bytes of F32 PCM, regardless of file duration;
-source-rate buffers, model weights and inference tensors need additional RAM.
-Input sample rates up to 384 kHz are supported by the file decoder.
+command. There is no duration limit. The library reads one chunk at a time from
+an `AudioSource`. A 30-second 16 kHz chunk contains 1,920,000 bytes of F32 PCM,
+regardless of duration; model weights and inference tensors need additional
+RAM. The CLI's WAV source reads at most the requested range plus resampling
+neighbors, mixes channels during reading, and keeps the resampling phase across
+boundaries. It supports input sample rates up to 384 kHz.
 
 Within the last three seconds of a chunk (or the last quarter of a small chunk),
-the decoder prefers a quiet interval of at least 120 ms. It does not drop or
+chunking prefers a quiet interval of at least 120 ms. It does not drop or
 duplicate source samples. Continuous speech without a suitable pause still
 uses the hard chunk limit; this is not a full VAD or overlap/deduplication system.
 Exact digital-zero padding is omitted from neural inference while preserving
@@ -79,7 +80,7 @@ its offset. Other low-volume sounds are not classified as silence.
 
 With word timestamps, ASR runs first and keeps each chunk's interval and text,
 a few hundred bytes per chunk. Its neural weights are released before the
-alignment pass re-reads the same WAV. Each neural model loads once per stage. Final segments
+alignment pass reads the same samples again. Each neural model loads once per stage. Final segments
 are emitted during alignment; text-only mode emits them during the first pass.
 Mapped BF16 weights are converted directly into owned CPU F32 storage without
 an intermediate BF16 tensor. Each tensor uses a short-lived mapping, so whole
@@ -87,14 +88,14 @@ checkpoint mappings do not remain resident alongside the final F32 weights.
 Tokenizers are shared across chunks. Alignment
 retains the complete attention context but projects only timestamp positions
 and releases each layer's temporary KV after use; ASR keeps its decode KV.
-The JSON writer streams segments to its destination and keeps only their text
-for the full `text` field. Processing time grows with duration. `--output`
-replaces the destination only after successful completion.
+The summary keeps the full text for the transcript's `text` field. The CLI
+writes each segment to its JSON output as it arrives. Processing time grows
+with duration. `--output` replaces the destination only after successful
+completion.
 
-The current decoder supports standard RIFF WAV, whose 32-bit size fields impose
+The CLI's WAV reader supports standard RIFF WAV, whose 32-bit size fields impose
 an approximately 4 GiB container limit (about 37 hours for 16 kHz mono PCM16).
-RF64 and compressed-media file decoding are not implemented here. Consumers
-can use their own media decoding for other formats.
+RF64 and compressed media are not decoded here.
 
 ## Rust API
 
@@ -108,8 +109,7 @@ Model weights are downloaded separately and are not embedded in the crate.
 ```rust,no_run
 # #[cfg(feature = "qwen3")]
 # fn main() -> anyhow::Result<()> {
-use std::{fs::File, io::BufWriter};
-use valle_asr::{AsrEngine, JsonTranscriptWriter, TranscribeOptions, models::qwen3::Qwen3};
+use valle_asr::{AsrEngine, TranscribeOptions, models::qwen3::Qwen3};
 
 let mut engine = AsrEngine::new();
 engine.register(Qwen3::load(
@@ -117,28 +117,27 @@ engine.register(Qwen3::load(
     "models/asr",
     Some("models/aligner".into()),
 )?)?;
-let mut output = JsonTranscriptWriter::new(BufWriter::new(File::create("transcript.json")?))?;
-let summary = engine.transcribe_file(
-    "qwen3-asr-0.6b",
-    "speech.wav",
-    &TranscribeOptions::default(),
-    &mut |segment| output.write_segment(segment),
-)?;
-output.finish(&summary)?;
+// Mono 16 kHz samples in [-1, 1], decoded by the application.
+let samples: Vec<f32> = vec![0.0; 16_000];
+let transcript = engine.transcribe("qwen3-asr-0.6b", &samples, &TranscribeOptions::default())?;
+println!("{}", transcript.text);
 # Ok(())
 # }
 # #[cfg(not(feature = "qwen3"))]
 # fn main() {}
 ```
 
-The existing `transcribe(&Audio, ...)` API remains available for already-loaded
-PCM and intentionally returns an in-memory `Transcript`. For long files, use
-`transcribe_file` and a sink that persists or displays segments without retaining
-them. A consumer collecting every callback into a vector will still grow RAM.
+`transcribe` keeps every segment in memory. For long audio, implement
+`AudioSource` to read samples on demand, for example from a decoder that can
+seek, and call `transcribe_source` with a sink that persists or displays each
+segment. Word timestamps read every chunk twice, once for recognition and once
+for alignment, so a source must allow reads from any offset. A `&[f32]` is a
+source as well. A sink that collects every segment into a vector still grows RAM.
 
 Implement `AsrModel` to register another model family. `AsrEngine` dispatches
-to the selected registered instance. Backends receive the same normalized
-audio and return the same model-independent result types. Qwen is optional:
+to the selected registered instance and checks that segments arrive in order
+inside the audio. Backends read the same samples and return the same
+model-independent result types. Qwen is optional:
 `cargo check --no-default-features --lib` builds the core API alone.
 
 ### Cancellation
@@ -164,7 +163,7 @@ existing stop flag without a monitoring thread. The flag must only transition
 from `false` to `true` during a request. Cancellation is permanent for all token
 clones; use a fresh token for the next request.
 
-Qwen checks cancellation while decoding/resampling WAV chunks, converting
+Qwen checks cancellation between chunks, converting
 weights, computing mel frames, running encoder/decoder/classifier layers and
 generating tokens. Both ASR and alignment passes check the flag, so word
 transcription can stop before its first result callback. Standalone alignment
@@ -187,7 +186,8 @@ promised, and no extra polling thread is created by the library.
 
 - `qwen3`: the built-in Qwen3 CPU backend.
 - `download`: revision-pinned model downloads with size and SHA-256 checks.
-- `cli`: the command-line application, including `qwen3` and `download`.
+- `cli`: the command-line application with its WAV reader and JSON output,
+  including `qwen3` and `download`.
 
 All three are enabled by default. The model-independent core can be used with
 `default-features = false` and no additional features.
@@ -233,9 +233,9 @@ alignment. Missing weights fail the model test.
 
 The real tests check English/Chinese character error rates, non-collapsed
 monotonic word spans inside source chunks, and offsets on a two-chunk clip.
-Every platform also runs a two-hour sparse WAV through the streaming API/JSON
-writer, continuous resampling tests, and real Qwen ASR/alignment on speech at
-both ends of a two-hour sparse WAV. The long fixture is mostly digital silence;
+Every platform also streams a two-hour sparse source through the engine, runs
+the WAV reader's continuous resampling tests, and runs real Qwen ASR/alignment
+on speech at both ends of a two-hour sparse source. The long fixture is mostly digital silence;
 it validates file handling, bounded chunks and global word offsets, not two
 hours of continuous-speech accuracy or throughput.
 Each platform uploads the output JSON and a timing/accuracy receipt. They
@@ -272,7 +272,7 @@ The default features are `qwen3`, `download` and `cli`. Library consumers can us
 `default-features = false` with `features = ["qwen3"]` for local model directories,
 or add `download` for the verified cache. No-default-features builds expose the
 model-independent core. The `cli` feature enables the backend and downloader;
-Clap is excluded from builds that omit `cli`. This ASR backend uses portable Rust CPU inference.
+Clap, hound and tempfile are excluded from builds that omit `cli`. This ASR backend uses portable Rust CPU inference.
 
 Each independent Windows/Linux/macOS workflow checks supported feature
 combinations, warning-free API documentation and `cargo publish --dry-run`,

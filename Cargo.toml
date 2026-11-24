@@ -20,12 +20,12 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [[bin]]
 name = "valle-asr"
-path = "src/main.rs"
+path = "src/cli/main.rs"
 required-features = ["cli"]
 
 [features]
 default = ["qwen3", "download", "cli"]
-cli = ["dep:clap", "dep:tempfile", "qwen3", "download"]
+cli = ["dep:clap", "dep:hound", "dep:tempfile", "qwen3", "download"]
 qwen3 = ["dep:candle-core", "dep:candle-nn", "dep:memmap2", "dep:safetensors", "dep:tokenizers"]
 download = ["dep:ureq", "dep:ring"]
 
@@ -36,7 +36,7 @@ candle-nn = { version = "0.11.1", default-features = false, optional = true }
 memmap2 = { version = "0.9.12", optional = true }
 safetensors = { version = "0.8.0", optional = true }
 clap = { version = "4.6.9", features = ["derive"], optional = true }
-hound = "3.5.1"
+hound = { version = "3.5.1", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
@@ -50,6 +50,7 @@ candle-core = { version = "0.11.1", default-features = false, features = ["accel
 candle-nn = { version = "0.11.1", default-features = false, features = ["accelerate"], optional = true }
 
 [dev-dependencies]
+hound = "3.5.1"
 tempfile = "3.27.0"
 
 [profile.release]

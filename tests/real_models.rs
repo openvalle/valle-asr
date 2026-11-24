@@ -7,9 +7,9 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
+use support::{SparseSource, fixture};
 use valle_asr::{
-    AsrModel, Audio, CancellationToken, Cancelled, JsonTranscriptWriter, TranscribeOptions,
-    Transcript,
+    AsrModel, AudioSource, CancellationToken, Cancelled, Segment, TranscribeOptions,
     cache::{ModelCache, builtin_model},
     models::qwen3::Qwen3,
 };
@@ -35,9 +35,34 @@ fn error_rate(reference: &str, hypothesis: &str) -> f64 {
     }
     row[b.len()] as f64 / a.len().max(1) as f64
 }
-fn check_timestamps(result: &Transcript) -> Result<()> {
+fn transcribe(
+    backend: &mut Qwen3,
+    audio: &mut dyn AudioSource,
+    options: &TranscribeOptions,
+) -> Result<Vec<Segment>> {
+    let mut segments = Vec::new();
+    backend.transcribe(audio, options, &mut |segment| {
+        segments.push(segment);
+        Ok(())
+    })?;
+    Ok(segments)
+}
+fn text(segments: &[Segment]) -> String {
+    let separator = if segments.iter().any(|s| s.language == "Chinese") {
+        ""
+    } else {
+        " "
+    };
+    segments
+        .iter()
+        .map(|s| s.text.as_str())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+fn check_timestamps(segments: &[Segment]) -> Result<()> {
     let mut previous = 0;
-    for segment in &result.segments {
+    for segment in segments {
         ensure!(
             !segment.words.is_empty(),
             "no aligned words: {}",
@@ -73,7 +98,7 @@ fn check_timestamps(result: &Transcript) -> Result<()> {
     }
     Ok(())
 }
-fn save(name: &str, result: &Transcript) -> Result<()> {
+fn save(name: &str, result: &[Segment]) -> Result<()> {
     std::fs::create_dir_all("artifacts")?;
     std::fs::write(
         format!("artifacts/{name}.json"),
@@ -103,12 +128,13 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
         ..Default::default()
     };
     let mut callbacks = 0;
+    let sample5 = fixture(&fixtures.join("sample5.wav"))?;
     let cancelled = std::thread::scope(|scope| {
         scope.spawn(|| {
             std::thread::sleep(Duration::from_millis(50));
             token.cancel();
         });
-        backend.transcribe_file(&fixtures.join("sample5.wav"), &options, &mut |_| {
+        backend.transcribe(&mut &sample5[..], &options, &mut |_| {
             callbacks += 1;
             Ok(())
         })
@@ -128,36 +154,22 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
             ..Default::default()
         };
         let case_start = Instant::now();
-        std::fs::create_dir_all("artifacts")?;
-        let output_path = format!("artifacts/{name}.json");
-        let mut writer = JsonTranscriptWriter::new(std::io::BufWriter::new(
-            std::fs::File::create(&output_path)?,
-        ))?;
-        let summary = backend.transcribe_file(
-            &fixtures.join(format!("{name}.wav")),
-            &options,
-            &mut |segment| writer.write_segment(segment),
-        )?;
-        writer.finish(&summary)?;
-        let result: Transcript = serde_json::from_reader(std::fs::File::open(&output_path)?)?;
-        ensure!(
-            result.duration_ms == summary.duration_ms
-                && result.segments.len() as u64 == summary.segment_count,
-            "streamed JSON summary mismatch"
-        );
-        println!("{name}: {}", result.text);
-        let cer = error_rate(&reference, &result.text);
+        let samples = fixture(&fixtures.join(format!("{name}.wav")))?;
+        let result = transcribe(&mut backend, &mut &samples[..], &options)?;
+        save(name, &result)?;
+        let result_text = text(&result);
+        println!("{name}: {result_text}");
+        let cer = error_rate(&reference, &result_text);
         ensure!(
             cer <= threshold,
-            "{name} character error rate {cer:.3}: {}",
-            result.text
+            "{name} character error rate {cer:.3}: {result_text}"
         );
         check_timestamps(&result)?;
-        receipts.push(serde_json::json!({"case":name,"cer":cer,"seconds":case_start.elapsed().as_secs_f64(),"duration_ms":result.duration_ms}));
+        receipts.push(serde_json::json!({"case":name,"cer":cer,"seconds":case_start.elapsed().as_secs_f64(),"duration_ms":result.last().map_or(0, |s| s.end_ms)}));
     }
     // Two copies in separate chunks verify that the second set of learned local
     // timestamps is offset into the original source timeline.
-    let single = Audio::from_wav(fixtures.join("sample1.wav"))?;
+    let single = fixture(&fixtures.join("sample1.wav"))?;
     let align_token = CancellationToken::default();
     let reference = std::fs::read_to_string(fixtures.join("sample1.txt"))?;
     let cancelled = std::thread::scope(|scope| {
@@ -177,21 +189,21 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
         "aligner was not reusable after cancellation"
     );
     eprintln!("[test] alignment cancelled and the resident aligner successfully reused");
-    let mut samples = single.samples().to_vec();
+    let mut samples = single.clone();
     samples.resize(4 * 16000, 0.0);
-    samples.extend_from_slice(single.samples());
-    let audio = Audio::from_mono(samples, 16000)?;
-    let result = backend.transcribe(
-        &audio,
+    samples.extend_from_slice(&single);
+    let result = transcribe(
+        &mut backend,
+        &mut &samples[..],
         &TranscribeOptions {
             language: Some("en".into()),
             chunk_seconds: 4,
             ..Default::default()
         },
     )?;
-    ensure!(result.segments.len() == 2, "expected two source chunks");
+    ensure!(result.len() == 2, "expected two source chunks");
     let reference = std::fs::read_to_string(fixtures.join("sample1.txt"))?;
-    for segment in &result.segments {
+    for segment in &result {
         ensure!(
             error_rate(&reference, &segment.text) <= 0.15,
             "chunk text mismatch: {}",
@@ -200,30 +212,35 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
     }
     check_timestamps(&result)?;
     ensure!(
-        result.segments[1].words[0].start_ms >= 4000,
+        result[1].words[0].start_ms >= 4000,
         "second chunk lost its global offset"
     );
     save("chunked-english", &result)?;
-    // A long timeline with real speech at both ends exercises the file decoder,
-    // disk-spooled ASR/alignment passes and JSON sink. Most samples are digital
-    // silence; this validates long-file handling, not two hours of speech CER.
-    let mut long_file = tempfile::NamedTempFile::new()?;
-    support::sparse_wav(long_file.as_file_mut(), 2 * 60 * 60)?;
-    let last_offset = 7200 * 16000 - single.samples().len() as u64;
-    support::write_pcm(long_file.as_file_mut(), 0, single.samples())?;
-    support::write_pcm(long_file.as_file_mut(), last_offset, single.samples())?;
+    // A long timeline with real speech at both ends exercises chunking, both
+    // ASR and alignment passes over a source read twice, and global offsets.
+    // Most samples are digital silence; this validates long sources, not two
+    // hours of speech CER.
+    let total = 7200 * 16000;
+    let last_offset = total - single.len() as u64;
+    let mut long_source = SparseSource {
+        samples: total,
+        inserts: vec![(0, single.clone()), (last_offset, single.clone())],
+    };
     let long_started = Instant::now();
-    let output = std::fs::File::create("artifacts/two-hour-stream.json")?;
-    let mut writer = JsonTranscriptWriter::new(std::io::BufWriter::new(output))?;
     let mut speech_segments = 0;
+    let mut segment_count = 0;
     let mut previous_word_end = 0;
-    let long_summary = backend.transcribe_file(
-        long_file.path(),
+    let mut previous_end = 0;
+    backend.transcribe(
+        &mut long_source,
         &TranscribeOptions {
             language: Some("en".into()),
             ..Default::default()
         },
         &mut |segment| {
+            ensure!(segment.start_ms == previous_end, "long-file timeline gap");
+            previous_end = segment.end_ms;
+            segment_count += 1;
             if !segment.text.is_empty() {
                 let cer = error_rate(&reference, &segment.text);
                 ensure!(cer <= 0.15, "long-file speech CER {cer}: {}", segment.text);
@@ -253,22 +270,18 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
                     "digital silence hallucinated words"
                 );
             }
-            writer.write_segment(segment)
+            Ok(())
         },
     )?;
-    writer.finish(&long_summary)?;
     ensure!(
-        speech_segments == 2 && long_summary.segment_count == 240,
+        speech_segments == 2 && segment_count == 240,
         "long-file speech/chunk count mismatch"
     );
-    ensure!(
-        long_summary.duration_ms == 7_200_000,
-        "long-file duration changed"
-    );
-    receipts.push(serde_json::json!({"case":"two-hour-stream","duration_ms":long_summary.duration_ms,
-        "segments":long_summary.segment_count,"speech_segments":speech_segments,
+    ensure!(previous_end == 7_200_000, "long-file duration changed");
+    receipts.push(serde_json::json!({"case":"two-hour-stream","duration_ms":previous_end,
+        "segments":segment_count,"speech_segments":speech_segments,
         "seconds":long_started.elapsed().as_secs_f64(),"mostly_digital_silence":true,"word_offset_passed":true}));
-    println!("two-hour streamed file: {long_summary:?}");
+    println!("two-hour source: {segment_count} segments, {speech_segments} with speech");
     std::fs::write(
         "artifacts/receipt.json",
         serde_json::to_vec_pretty(

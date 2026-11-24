@@ -1,64 +1,29 @@
 use crate::{
-    Audio, ModelInfo, Segment, TranscribeOptions, Transcript, TranscriptSummary, WavChunks,
+    AudioSource, ModelInfo, Segment, TranscribeOptions, Transcript, TranscriptSummary,
+    audio::duration_ms,
 };
 use anyhow::{Result, bail, ensure};
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
 
 /// The extension point for model families. No Qwen types appear in this contract.
 pub trait AsrModel: Send {
     /// Return the backend identity and capabilities.
     fn info(&self) -> ModelInfo;
-    /// Recognize in-memory audio. Segment and word times are relative to this input.
-    /// Backends must honor supported options, check `options.cancellation` during
-    /// inference, and return [`crate::Cancelled`] instead of partial success.
-    fn transcribe(&mut self, audio: &Audio, options: &TranscribeOptions) -> Result<Transcript>;
 
-    /// Process one complete WAV with bounded audio buffers, delivering results
-    /// to a fallible sink. Backends can override this to optimize model residency.
-    fn transcribe_file(
+    /// Recognize a source of mono 16 kHz samples and pass each segment to
+    /// `emit` in source order. Segment and word times are milliseconds on the
+    /// source timeline. Backends must honor supported options, check
+    /// `options.cancellation` during inference, and return [`crate::Cancelled`]
+    /// instead of partial success.
+    ///
+    /// # Errors
+    /// Returns source, inference and sink errors.
+    fn transcribe(
         &mut self,
-        path: &Path,
+        audio: &mut dyn AudioSource,
         options: &TranscribeOptions,
         emit: &mut dyn FnMut(Segment) -> Result<()>,
-    ) -> Result<TranscriptSummary> {
-        options.validate()?;
-        let mut chunks = WavChunks::open(path, options.chunk_seconds)?;
-        let mut summary = SummaryBuilder::new(self.info().id, chunks.duration_ms());
-        while let Some(chunk) = chunks.next_chunk_with_cancellation(&options.cancellation)? {
-            let result = self.transcribe(&chunk.audio, options)?;
-            options.cancellation.check()?;
-            let segments = if result.segments.is_empty() {
-                vec![Segment {
-                    text: result.text,
-                    language: result.language,
-                    start_ms: 0,
-                    end_ms: chunk.audio.duration_ms(),
-                    words: vec![],
-                }]
-            } else {
-                result.segments
-            };
-            for mut segment in segments {
-                options.cancellation.check()?;
-                ensure!(
-                    segment.start_ms <= segment.end_ms
-                        && segment.end_ms <= chunk.audio.duration_ms(),
-                    "backend segment outside its source chunk"
-                );
-                segment.start_ms += chunk.start_ms();
-                segment.end_ms = (segment.end_ms + chunk.start_ms()).min(chunk.end_ms());
-                for word in &mut segment.words {
-                    word.start_ms = (word.start_ms + chunk.start_ms()).min(segment.end_ms);
-                    word.end_ms = (word.end_ms + chunk.start_ms()).min(segment.end_ms);
-                }
-                summary.observe(&segment);
-                emit(segment)?;
-                options.cancellation.check()?;
-            }
-        }
-        options.cancellation.check()?;
-        Ok(summary.finish())
-    }
+    ) -> Result<()>;
 }
 
 #[derive(Default)]
@@ -93,35 +58,45 @@ impl AsrEngine {
         self.models.values().map(|m| m.info()).collect()
     }
 
-    /// Recognize in-memory audio with the selected backend.
+    /// Recognize mono 16 kHz samples held in memory, keeping every segment.
     ///
     /// # Errors
-    /// Rejects invalid options, cancellation and an unregistered model ID,
-    /// and propagates backend failures. Cancellation is [`crate::Cancelled`].
+    /// Rejects invalid options, empty or invalid samples, cancellation and an
+    /// unregistered model ID, and propagates backend failures. Cancellation is
+    /// [`crate::Cancelled`].
     pub fn transcribe(
         &mut self,
         model: &str,
-        audio: &Audio,
+        samples: &[f32],
         options: &TranscribeOptions,
     ) -> Result<Transcript> {
-        options.validate()?;
-        let Some(backend) = self.models.get_mut(model) else {
-            bail!("model is not registered: {model}")
-        };
-        let result = backend.transcribe(audio, options)?;
-        options.cancellation.check()?;
-        Ok(result)
+        let mut source = samples;
+        let mut segments = Vec::new();
+        let summary = self.transcribe_source(model, &mut source, options, &mut |segment| {
+            segments.push(segment);
+            Ok(())
+        })?;
+        Ok(Transcript {
+            model: summary.model,
+            text: summary.text,
+            language: summary.language,
+            duration_ms: summary.duration_ms,
+            segments,
+        })
     }
 
-    /// Stream a complete file through the selected backend. The caller decides
-    /// whether segments are displayed, persisted, or collected in memory.
+    /// Recognize a source of any length, passing each segment to `emit` as it
+    /// is ready. The caller decides whether segments are displayed, persisted,
+    /// or collected in memory. The summary keeps the full text, a few hundred
+    /// bytes per 30 seconds of speech.
     ///
     /// # Errors
-    /// Rejects an unregistered model ID and propagates decoding, inference and sink errors.
-    pub fn transcribe_file(
+    /// Rejects an empty source and an unregistered model ID, and propagates
+    /// source, inference and sink errors.
+    pub fn transcribe_source(
         &mut self,
         model: &str,
-        path: impl AsRef<Path>,
+        audio: &mut dyn AudioSource,
         options: &TranscribeOptions,
         emit: &mut dyn FnMut(Segment) -> Result<()>,
     ) -> Result<TranscriptSummary> {
@@ -129,27 +104,49 @@ impl AsrEngine {
         let Some(backend) = self.models.get_mut(model) else {
             bail!("model is not registered: {model}")
         };
-        let result = backend.transcribe_file(path.as_ref(), options, &mut |segment| {
+        ensure!(audio.samples() > 0, "audio is empty");
+        let duration_ms = duration_ms(audio.samples());
+        let mut summary = SummaryBuilder::new(model.to_owned(), duration_ms);
+        let mut previous_end = 0;
+        backend.transcribe(audio, options, &mut |segment| {
             options.cancellation.check()?;
+            ensure!(
+                previous_end <= segment.start_ms
+                    && segment.start_ms <= segment.end_ms
+                    && segment.end_ms <= duration_ms,
+                "backend segment out of order or outside the audio"
+            );
+            ensure!(
+                segment
+                    .words
+                    .iter()
+                    .all(|word| segment.start_ms <= word.start_ms
+                        && word.start_ms <= word.end_ms
+                        && word.end_ms <= segment.end_ms),
+                "backend word outside its segment"
+            );
+            previous_end = segment.end_ms;
+            summary.observe(&segment);
             emit(segment)?;
             options.cancellation.check()?;
             Ok(())
         })?;
         options.cancellation.check()?;
-        Ok(result)
+        Ok(summary.finish())
     }
 }
 
-pub(crate) struct SummaryBuilder {
+struct SummaryBuilder {
     summary: TranscriptSummary,
     has_speech: bool,
 }
 
 impl SummaryBuilder {
-    pub(crate) fn new(model: String, duration_ms: u64) -> Self {
+    fn new(model: String, duration_ms: u64) -> Self {
         Self {
             summary: TranscriptSummary {
                 model,
+                text: String::new(),
                 language: String::new(),
                 duration_ms,
                 segment_count: 0,
@@ -158,15 +155,59 @@ impl SummaryBuilder {
         }
     }
 
-    pub(crate) fn observe(&mut self, segment: &Segment) {
+    // The language of the first segment with speech names the transcript, and
+    // so decides whether segment texts are joined with spaces.
+    fn observe(&mut self, segment: &Segment) {
         if self.summary.segment_count == 0 || (!self.has_speech && !segment.text.is_empty()) {
             self.summary.language.clone_from(&segment.language);
         }
-        self.has_speech |= !segment.text.is_empty();
+        if !segment.text.is_empty() {
+            if self.has_speech
+                && !["Chinese", "Cantonese", "Japanese"].contains(&self.summary.language.as_str())
+            {
+                self.summary.text.push(' ');
+            }
+            self.summary.text.push_str(&segment.text);
+            self.has_speech = true;
+        }
         self.summary.segment_count += 1;
     }
 
-    pub(crate) fn finish(self) -> TranscriptSummary {
+    fn finish(self) -> TranscriptSummary {
         self.summary
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn segment(text: &str, language: &str) -> Segment {
+        Segment {
+            text: text.into(),
+            language: language.into(),
+            start_ms: 0,
+            end_ms: 1,
+            words: vec![],
+        }
+    }
+
+    #[test]
+    fn text_is_joined_by_the_language_of_the_first_speech() {
+        let mut chinese = SummaryBuilder::new("m".into(), 1);
+        for text in ["", "你好", "", "世界"] {
+            chinese.observe(&segment(text, if text.is_empty() { "" } else { "Chinese" }));
+        }
+        let chinese = chinese.finish();
+        assert_eq!(
+            (chinese.text.as_str(), chinese.language.as_str()),
+            ("你好世界", "Chinese")
+        );
+        assert_eq!(chinese.segment_count, 4);
+        let mut english = SummaryBuilder::new("m".into(), 1);
+        for text in ["Hello", "world"] {
+            english.observe(&segment(text, "English"));
+        }
+        assert_eq!(english.finish().text, "Hello world");
     }
 }

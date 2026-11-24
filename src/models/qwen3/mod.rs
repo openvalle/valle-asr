@@ -1,14 +1,14 @@
 //! Qwen3-ASR and its separate learned timestamp classifier, running on CPU.
 mod config;
 mod dsp;
-mod file;
 mod network;
+mod source;
 mod text;
 mod weights;
 
 use crate::{
-    AsrModel, Audio, CancellationToken, ModelInfo, Segment, TimestampMode, TranscribeOptions,
-    Transcript, Word,
+    AsrModel, AudioSource, CancellationToken, ModelInfo, SAMPLE_RATE, Segment, TranscribeOptions,
+    Word, audio::duration_ms,
 };
 use anyhow::{Context, Result, bail, ensure};
 use candle_core::Tensor;
@@ -164,7 +164,8 @@ impl Qwen3 {
         )
     }
 
-    /// Align a known transcript to a single clip of at most 30 seconds.
+    /// Align a known transcript to a clip of at most 30 seconds of mono 16 kHz
+    /// samples.
     ///
     /// Empty text returns no words. Times are relative to the supplied clip.
     /// Chinese/Cantonese units are Han characters.
@@ -172,8 +173,13 @@ impl Qwen3 {
     /// # Errors
     /// Rejects clips over 30 seconds, unsupported alignment languages, missing
     /// aligner weights, and failed model loading or inference.
-    pub fn align(&mut self, audio: &Audio, transcript: &str, language: &str) -> Result<Vec<Word>> {
-        self.align_with_cancellation(audio, transcript, language, &CancellationToken::default())
+    pub fn align(
+        &mut self,
+        samples: &[f32],
+        transcript: &str,
+        language: &str,
+    ) -> Result<Vec<Word>> {
+        self.align_with_cancellation(samples, transcript, language, &CancellationToken::default())
     }
 
     /// Align a known transcript with cooperative cancellation, including model loading.
@@ -184,17 +190,23 @@ impl Qwen3 {
     /// loading and inference errors as [`Self::align`].
     pub fn align_with_cancellation(
         &mut self,
-        audio: &Audio,
+        samples: &[f32],
         transcript: &str,
         language: &str,
         cancellation: &CancellationToken,
     ) -> Result<Vec<Word>> {
         cancellation.check()?;
         ensure!(
-            audio.samples().len() <= 30 * Audio::SAMPLE_RATE as usize,
+            samples.len() <= 30 * SAMPLE_RATE as usize,
             "alignment clips must be at most 30 seconds"
         );
-        let words = self.align_chunk(audio.samples(), transcript, language, cancellation)?;
+        ensure!(
+            samples
+                .iter()
+                .all(|v| v.is_finite() && (-1.0..=1.0).contains(v)),
+            "samples must be finite and within [-1, 1]"
+        );
+        let words = self.align_chunk(samples, transcript, language, cancellation)?;
         cancellation.check()?;
         Ok(words)
     }
@@ -268,7 +280,7 @@ impl Qwen3 {
             .collect();
         cancellation.check()?;
         let timestamps = text::repair_timestamps(&timestamps);
-        let duration = (samples.len() as u64 * 1000).div_ceil(u64::from(Audio::SAMPLE_RATE));
+        let duration = duration_ms(samples.len() as u64);
         Ok(words
             .into_iter()
             .enumerate()
@@ -302,85 +314,12 @@ impl AsrModel for Qwen3 {
         }
     }
 
-    fn transcribe_file(
+    fn transcribe(
         &mut self,
-        path: &Path,
+        audio: &mut dyn AudioSource,
         options: &TranscribeOptions,
         emit: &mut dyn FnMut(Segment) -> Result<()>,
-    ) -> Result<crate::TranscriptSummary> {
-        self.transcribe_wav(path, options, emit)
-    }
-
-    fn transcribe(&mut self, audio: &Audio, options: &TranscribeOptions) -> Result<Transcript> {
-        options.validate()?;
-        if options.timestamps == TimestampMode::Word {
-            ensure!(
-                self.aligner_dir.is_some(),
-                "word timestamps require Qwen3-ForcedAligner"
-            );
-        }
-        let chunk_size = options.chunk_seconds as usize * Audio::SAMPLE_RATE as usize;
-        let mut segments = Vec::new();
-        for (index, samples) in audio.samples().chunks(chunk_size).enumerate() {
-            let (text, language) = self
-                .transcribe_chunk(samples, options)
-                .with_context(|| format!("transcribe chunk {index}"))?;
-            let start_ms = index as u64 * u64::from(options.chunk_seconds) * 1000;
-            let end_ms = (start_ms
-                + (samples.len() as u64 * 1000).div_ceil(u64::from(Audio::SAMPLE_RATE)))
-            .min(audio.duration_ms());
-            segments.push(Segment {
-                text,
-                language,
-                start_ms,
-                end_ms,
-                words: Vec::new(),
-            });
-        }
-        // Run all ASR chunks before switching to the aligner, so each set of
-        // weights is loaded only once per task, regardless of audio duration.
-        if options.timestamps == TimestampMode::Word {
-            for (index, segment) in segments.iter_mut().enumerate() {
-                let samples = &audio.samples()
-                    [index * chunk_size..((index + 1) * chunk_size).min(audio.samples().len())];
-                segment.words = self
-                    .align_chunk(
-                        samples,
-                        &segment.text,
-                        &segment.language,
-                        &options.cancellation,
-                    )
-                    .with_context(|| format!("align chunk {index}"))?;
-                for word in &mut segment.words {
-                    word.start_ms += segment.start_ms;
-                    word.end_ms += segment.start_ms;
-                }
-            }
-        }
-        let language = segments
-            .iter()
-            .find(|s| !s.text.is_empty())
-            .or_else(|| segments.first())
-            .map(|s| s.language.clone())
-            .unwrap_or_default();
-        let separator = if ["Chinese", "Cantonese", "Japanese"].contains(&language.as_str()) {
-            ""
-        } else {
-            " "
-        };
-        let text = segments
-            .iter()
-            .map(|s| s.text.as_str())
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join(separator);
-        options.cancellation.check()?;
-        Ok(Transcript {
-            model: self.id.clone(),
-            text,
-            language,
-            duration_ms: audio.duration_ms(),
-            segments,
-        })
+    ) -> Result<()> {
+        self.transcribe_source(audio, options, emit)
     }
 }

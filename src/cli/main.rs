@@ -1,3 +1,6 @@
+mod json;
+mod wav;
+
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use std::{
@@ -107,9 +110,9 @@ fn main() -> Result<()> {
         } => {
             #[cfg(feature = "qwen3")]
             {
+                use json::JsonTranscriptWriter;
                 use valle_asr::{
-                    AsrEngine, JsonTranscriptWriter, TimestampMode, TranscribeOptions,
-                    models::qwen3::Qwen3,
+                    AsrEngine, TimestampMode, TranscribeOptions, models::qwen3::Qwen3,
                 };
                 if !model.starts_with("qwen3-asr-") {
                     bail!("unsupported model family: {model}");
@@ -158,6 +161,7 @@ fn main() -> Result<()> {
                     context,
                     ..Default::default()
                 };
+                let mut input = wav::Wav::open(&input)?;
                 if let Some(output) = output {
                     let parent = output
                         .parent()
@@ -167,8 +171,8 @@ fn main() -> Result<()> {
                     let mut writer =
                         JsonTranscriptWriter::new(BufWriter::new(temporary.as_file_mut()))?;
                     let summary =
-                        engine.transcribe_file(&model, &input, &options, &mut |segment| {
-                            writer.write_segment(segment)
+                        engine.transcribe_source(&model, &mut input, &options, &mut |segment| {
+                            writer.write_segment(&segment)
                         })?;
                     writer.finish(&summary)?;
                     temporary.persist(&output)?;
@@ -176,8 +180,8 @@ fn main() -> Result<()> {
                     let stdout = std::io::stdout();
                     let mut writer = JsonTranscriptWriter::new(BufWriter::new(stdout.lock()))?;
                     let summary =
-                        engine.transcribe_file(&model, &input, &options, &mut |segment| {
-                            writer.write_segment(segment)
+                        engine.transcribe_source(&model, &mut input, &options, &mut |segment| {
+                            writer.write_segment(&segment)
                         })?;
                     writer.finish(&summary)?;
                 }

@@ -29,7 +29,7 @@ pub struct Segment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-/// An in-memory transcription; use the file API to bound result memory.
+/// A transcription with every segment kept in memory.
 pub struct Transcript {
     /// ID of the backend that produced the result.
     pub model: String,
@@ -43,12 +43,15 @@ pub struct Transcript {
     pub segments: Vec<Segment>,
 }
 
-/// Metadata returned by file transcription; segments are delivered to a sink.
-/// It deliberately contains no growing transcript text or segment vector.
+/// What [`crate::AsrEngine::transcribe_source`] returns once every segment
+/// has gone to the sink. It keeps the full text but no segments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TranscriptSummary {
     /// ID of the backend that produced the result.
     pub model: String,
+    /// Text of every segment, joined without spaces for Chinese, Cantonese
+    /// and Japanese.
+    pub text: String,
     /// Detected language name for this result.
     pub language: String,
     /// Total source duration in milliseconds.

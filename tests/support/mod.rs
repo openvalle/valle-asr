@@ -1,38 +1,48 @@
-use anyhow::Result;
-use std::{
-    fs::File,
-    io::{Seek, SeekFrom, Write},
-};
+#![allow(dead_code)]
+use anyhow::{Result, ensure};
+use std::path::Path;
+use valle_asr::{AudioSource, SAMPLE_RATE};
 
-/// A standard PCM WAV with a sparse zero-filled payload; no duration-sized PCM
-/// vector and no large checked-in binary are required to construct this fixture.
-pub fn sparse_wav(file: &mut File, seconds: u32) -> Result<()> {
-    let size = seconds * 16000 * 2;
-    file.write_all(b"RIFF")?;
-    file.write_all(&(size + 36).to_le_bytes())?;
-    file.write_all(b"WAVEfmt ")?;
-    file.write_all(&16u32.to_le_bytes())?;
-    for value in [1u16, 1] {
-        file.write_all(&value.to_le_bytes())?;
-    }
-    for value in [16000u32, 32000] {
-        file.write_all(&value.to_le_bytes())?;
-    }
-    for value in [2u16, 16] {
-        file.write_all(&value.to_le_bytes())?;
-    }
-    file.write_all(b"data")?;
-    file.write_all(&size.to_le_bytes())?;
-    file.set_len(u64::from(size) + 44)?;
-    Ok(())
+/// Digital silence of any length with a few clips of sound inserted, so a
+/// two-hour source needs no duration-sized vector or large checked-in binary.
+pub struct SparseSource {
+    pub samples: u64,
+    pub inserts: Vec<(u64, Vec<f32>)>,
 }
 
-pub fn write_pcm(file: &mut File, offset_samples: u64, samples: &[f32]) -> Result<()> {
-    file.seek(SeekFrom::Start(44 + offset_samples * 2))?;
-    let mut output = std::io::BufWriter::new(file);
-    for sample in samples {
-        output.write_all(&((*sample * 32768.0).round() as i16).to_le_bytes())?;
+impl AudioSource for SparseSource {
+    fn samples(&self) -> u64 {
+        self.samples
     }
-    output.flush()?;
-    Ok(())
+
+    fn read(&mut self, start: u64, out: &mut [f32]) -> Result<()> {
+        ensure!(
+            start + out.len() as u64 <= self.samples,
+            "read past the end"
+        );
+        out.fill(0.0);
+        let end = start + out.len() as u64;
+        for (offset, clip) in &self.inserts {
+            let from = start.max(*offset);
+            let to = end.min(offset + clip.len() as u64);
+            for index in from..to {
+                out[(index - start) as usize] = clip[(index - offset) as usize];
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Read a 16 kHz mono PCM16 fixture.
+pub fn fixture(path: &Path) -> Result<Vec<f32>> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    ensure!(
+        spec.sample_rate == SAMPLE_RATE && spec.channels == 1 && spec.bits_per_sample == 16,
+        "fixtures are 16 kHz mono PCM16"
+    );
+    Ok(reader
+        .samples::<i16>()
+        .map(|v| v.map(|x| f32::from(x) / 32768.0))
+        .collect::<Result<_, _>>()?)
 }

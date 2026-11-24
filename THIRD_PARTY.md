@@ -55,10 +55,10 @@ upstream repository and commit, file sizes, SHA-256 hashes and reference text
 for the four copied English/Chinese fixture files. The upstream MIT notice is
 included alongside this provenance in the crate's `third_party/` directory.
 
-Long-file regression tests generate sparse PCM WAV files in `tests/support/`.
+Long-file regression tests generate sparse sample sources in `tests/support/`.
 Their real speech inserts repeat the existing MIT-licensed `sample1.wav` at
 both ends of a two-hour timeline; no additional audio corpus or external
-evaluation code is included. The file decoder, streaming writer and sampling
+evaluation code is included. The WAV reader, JSON writer and sampling
 test helpers are newly implemented in this repository.
 
 ## Model weights
