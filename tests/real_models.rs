@@ -1,6 +1,6 @@
 //! CI invokes this ignored test explicitly on every supported OS. Missing models
 //! fail the test; it never silently skips inference.
-#![cfg(all(feature = "qwen3", feature = "download"))]
+#![cfg(feature = "qwen3")]
 #[macro_use]
 mod support;
 use std::{
@@ -10,8 +10,7 @@ use std::{
 use support::{Result, SparseSource, fixture};
 use valle_asr::{
     AsrEngine, AsrModel, AudioSource, CancellationToken, Error, Segment, TranscribeOptions,
-    cache::{ModelCache, builtin_model},
-    models::qwen3::Qwen3,
+    models::{builtin_model, qwen3::Qwen3},
 };
 
 fn normalized(text: &str) -> Vec<char> {
@@ -108,14 +107,24 @@ fn save(name: &str, result: &[Segment]) -> Result<()> {
 }
 
 #[test]
-#[ignore = "downloads ~3.7 GB of pinned models; CI runs this explicitly after warming its model cache"]
+#[ignore = "needs ~3.7 GB of pinned models; CI downloads them with the CLI, then runs this explicitly"]
 fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
     let started = Instant::now();
     let root = std::env::var_os("VALLE_ASR_TEST_CACHE")
         .ok_or("VALLE_ASR_TEST_CACHE must point to verified models")?;
-    let cache = ModelCache::new(root);
-    let model = cache.ensure(&builtin_model("qwen3-asr-0.6b")?, true)?;
-    let aligner = cache.ensure(&builtin_model("qwen3-forced-aligner-0.6b")?, true)?;
+    // The CLI's `download --cache-dir` stores each revision at <id>/<revision>.
+    let dir = |id: &str| -> Result<std::path::PathBuf> {
+        let spec = builtin_model(id)?;
+        let dir = Path::new(&root).join(&spec.id).join(&spec.revision);
+        ensure!(
+            spec.missing(&dir).is_empty(),
+            "{id} is incomplete in {}",
+            dir.display()
+        );
+        Ok(dir)
+    };
+    let model = dir("qwen3-asr-0.6b")?;
+    let aligner = dir("qwen3-forced-aligner-0.6b")?;
     let mut backend = Qwen3::load("qwen3-asr-0.6b", model, Some(aligner))?;
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     // Cancel before the first word-timestamp sink callback can run. The file

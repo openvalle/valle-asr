@@ -18,24 +18,6 @@ pub enum Error {
     /// an [`crate::AsrEngine`].
     #[error("unknown model: {0}")]
     UnknownModel(String),
-    /// An offline request found a model file missing or corrupt in the cache.
-    #[error("model {id} is missing or corrupt in the offline cache at {}", dir.display())]
-    MissingModel {
-        /// Model ID.
-        id: String,
-        /// Revision directory in the cache.
-        dir: PathBuf,
-    },
-    /// A model file could not be downloaded or failed its size or SHA-256
-    /// check. Partial downloads are never used.
-    #[error("download {file}")]
-    Download {
-        /// File name within the model revision.
-        file: String,
-        /// What failed.
-        #[source]
-        source: BoxError,
-    },
     /// A language the model does not recognize.
     #[error("unsupported language: {0}")]
     Language(String),
@@ -71,7 +53,7 @@ impl Error {
         Self::Model(message.to_string())
     }
 
-    #[cfg(any(feature = "download", feature = "qwen3"))]
+    #[cfg(feature = "qwen3")]
     pub(crate) fn io(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> Self {
         let path = path.into();
         move |source| Self::Io { path, source }

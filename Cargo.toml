@@ -15,7 +15,7 @@ include = ["src/**", "third_party/**", "Cargo.toml", "Cargo.lock", "LICENSE", "R
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["qwen3", "download"]
+features = ["qwen3"]
 targets = ["x86_64-unknown-linux-gnu"]
 
 [[bin]]
@@ -24,10 +24,9 @@ path = "src/cli/main.rs"
 required-features = ["cli"]
 
 [features]
-default = ["qwen3", "download", "cli"]
-cli = ["dep:clap", "dep:hound", "dep:tempfile", "qwen3", "download"]
+default = ["qwen3", "cli"]
+cli = ["dep:clap", "dep:hound", "dep:ring", "dep:tempfile", "dep:ureq", "qwen3"]
 qwen3 = ["dep:candle-core", "dep:candle-nn", "dep:memmap2", "dep:safetensors", "dep:tokenizers"]
-download = ["dep:ureq", "dep:ring"]
 
 [dependencies]
 candle-core = { version = "0.11.1", default-features = false, optional = true }

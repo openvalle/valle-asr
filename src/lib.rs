@@ -2,8 +2,6 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 mod audio;
-#[cfg(feature = "download")]
-pub mod cache;
 mod cancellation;
 #[cfg(feature = "qwen3")]
 mod chunks;

@@ -11,6 +11,7 @@ macro_rules! ensure {
     };
 }
 
+mod download;
 mod json;
 mod wav;
 
@@ -19,6 +20,7 @@ use std::{
     io::BufWriter,
     path::{Path, PathBuf},
 };
+use valle_asr::models::{builtin_model, builtin_models};
 
 #[derive(Parser)]
 #[command(
@@ -71,11 +73,10 @@ enum Command {
     },
 }
 
-#[cfg(feature = "download")]
-fn cache(root: Option<PathBuf>) -> Result<valle_asr::cache::ModelCache> {
-    Ok(valle_asr::cache::ModelCache::new(match root {
+fn cache(root: Option<PathBuf>) -> Result<download::ModelCache> {
+    Ok(download::ModelCache::new(match root {
         Some(root) => root,
-        None => valle_asr::cache::ModelCache::default_path()?,
+        None => download::ModelCache::default_path()?,
     }))
 }
 
@@ -96,28 +97,17 @@ fn main() -> std::process::ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Models => {
-            #[cfg(feature = "download")]
-            println!("{}",serde_json::to_string_pretty(&valle_asr::cache::builtin_models().iter().map(|m|serde_json::json!({"id":m.id,"repository":m.repository,"revision":m.revision,"license":m.license})).collect::<Vec<_>>())?);
-            #[cfg(not(feature = "download"))]
-            return Err("model catalog requires the download feature".into());
+            println!("{}",serde_json::to_string_pretty(&builtin_models().iter().map(|m|serde_json::json!({"id":m.id,"repository":m.repository,"revision":m.revision,"license":m.license})).collect::<Vec<_>>())?);
         }
         Command::Download {
             model,
             cache_dir,
             offline,
         } => {
-            #[cfg(feature = "download")]
-            {
-                let cache = cache(cache_dir)?;
-                for id in [&model, "qwen3-forced-aligner-0.6b"] {
-                    let path = cache.ensure(&valle_asr::cache::builtin_model(id)?, offline)?;
-                    println!("{}", path.display());
-                }
-            }
-            #[cfg(not(feature = "download"))]
-            {
-                let _ = (model, cache_dir, offline);
-                return Err("downloads are disabled".into());
+            let cache = cache(cache_dir)?;
+            for id in [&model, "qwen3-forced-aligner-0.6b"] {
+                let path = cache.ensure(&builtin_model(id)?, offline)?;
+                println!("{}", path.display());
             }
         }
         Command::Transcribe {
@@ -144,33 +134,22 @@ fn run(cli: Cli) -> Result<()> {
                     model.starts_with("qwen3-asr-"),
                     "unsupported model family: {model}"
                 );
-                #[cfg(feature = "download")]
                 let (model_dir, aligner_dir) = {
                     let cache = cache(cache_dir)?;
                     let asr = match model_dir {
                         Some(p) => p,
-                        None => cache.ensure(&valle_asr::cache::builtin_model(&model)?, offline)?,
+                        None => cache.ensure(&builtin_model(&model)?, offline)?,
                     };
                     let aligner = if text_only {
                         None
                     } else {
                         Some(match aligner_dir {
                             Some(p) => p,
-                            None => cache.ensure(
-                                &valle_asr::cache::builtin_model("qwen3-forced-aligner-0.6b")?,
-                                offline,
-                            )?,
+                            None => cache
+                                .ensure(&builtin_model("qwen3-forced-aligner-0.6b")?, offline)?,
                         })
                     };
                     (asr, aligner)
-                };
-                #[cfg(not(feature = "download"))]
-                let (model_dir, aligner_dir) = {
-                    let _ = (cache_dir, offline);
-                    (
-                        model_dir.ok_or("--model-dir is required without downloads")?,
-                        aligner_dir,
-                    )
                 };
                 let mut engine = AsrEngine::new();
                 engine.register(Qwen3::load(&model, model_dir, aligner_dir)?)?;

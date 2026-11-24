@@ -16,9 +16,12 @@ word timestamps. The first backend is **Qwen3-ASR**, paired with
   through Candle. On macOS, matrix products use the system Accelerate
   framework. Python, libtorch, OpenBLAS and a GPU are not required to
   transcribe audio.
-- Built-in official Qwen3-ASR 0.6B and ForcedAligner 0.6B downloads. Local
-  directories can also load the matching original Qwen3-ASR 1.7B architecture;
-  1.7B has not yet been included in the validation matrix.
+- A catalog of the official Qwen3-ASR 0.6B and ForcedAligner 0.6B revisions it
+  was validated with, and an offline check of a model directory against it.
+  The library downloads nothing; the CLI's downloader fetches the catalog's
+  files for development and CI. Local directories can also load the matching
+  original Qwen3-ASR 1.7B architecture; 1.7B has not yet been included in the
+  validation matrix.
 - The library takes mono 16 kHz f32 samples and returns segments with word
   timestamps. Decoding media is left to the caller, such as Valle's FFmpeg
   integration. The CLI reads mono/stereo integer/float WAV and resamples it
@@ -101,10 +104,16 @@ RF64 and compressed media are not decoded here.
 
 ```toml
 [dependencies]
-valle-asr = { version = "0.3.0", default-features = false, features = ["qwen3", "download"] }
+valle-asr = { version = "0.3.0", default-features = false, features = ["qwen3"] }
 ```
 
-Model weights are downloaded separately and are not embedded in the crate.
+The library reads models from local directories and never uses the network.
+`valle_asr::models::builtin_models()` lists the revisions it was validated
+with: each one's Hugging Face repository and commit, and every file's size and
+SHA-256. A downloader can fetch and verify those files, then call
+`ModelSpec::missing(dir)` before loading to see which files a directory lacks
+or holds with the wrong size. That check reads no file contents, so a
+downloader should verify each file's SHA-256 before giving it its final name.
 
 ```rust,no_run
 # #[cfg(feature = "qwen3")]
@@ -144,8 +153,7 @@ model-independent result types. Qwen is optional:
 
 Every fallible call returns `valle_asr::Result<T>`, whose error is the
 `valle_asr::Error` enum. Match on its variants: `Cancelled`, `UnknownModel`,
-`MissingModel` (an offline cache without the model), `Download`, `Language`,
-`Invalid` (options, samples or arguments), `Audio` and `Sink` (holding the
+`Language`, `Invalid` (options, samples or arguments), `Audio` and `Sink` (holding the
 error your source or sink returned), `Model` (loading or inference) and `Io`.
 The enum is non-exhaustive. Sources and sinks return
 `Result<_, valle_asr::BoxError>`, so they can fail with their own error types.
@@ -187,24 +195,25 @@ Custom backends must check the token during their own compute; the engine also
 checks before dispatch, around sink callbacks and before returning success.
 
 Cancellation is cooperative: a running tensor/CPU operator or blocking file
-operation finishes before the next checkpoint. Model constructors and downloads
-have no cancellation parameter. No fixed wall-clock cancellation latency is
+operation finishes before the next checkpoint. Model constructors have no
+cancellation parameter. No fixed wall-clock cancellation latency is
 promised, and no extra polling thread is created by the library.
 
 ### Features
 
 - `qwen3`: the built-in Qwen3 CPU backend.
-- `download`: revision-pinned model downloads with size and SHA-256 checks.
-- `cli`: the command-line application with its WAV reader and JSON output,
-  including `qwen3` and `download`.
+- `cli`: the command-line application with its WAV reader, JSON output and
+  model downloader, including `qwen3`.
 
-All three are enabled by default. The model-independent core can be used with
+Both are enabled by default. The model-independent core can be used with
 `default-features = false` and no additional features.
 
-## Cache behavior
+## CLI model cache
 
-The model cache defaults to `VALLE_ASR_CACHE` when set, otherwise to the native
-user cache directory. `--cache-dir` overrides it. Every revision has its own
+The CLI's downloader serves development and CI; it fetches from Hugging Face
+only, without resuming an interrupted file. Applications should fetch models
+themselves. The CLI's cache defaults to `VALLE_ASR_CACHE` when set, otherwise
+to the native user cache directory. `--cache-dir` overrides it. Every revision has its own
 directory and cross-process writer lock. Existing files are reused only after
 size and SHA-256 validation; interrupted `.part` files are never treated as
 models. Downloads are verified before a final rename. Revisions are immutable
@@ -277,11 +286,11 @@ documentation test.
 Changes to native sources must retain upstream notices, source hashes and
 reproducible patches. The permissive-license policy in THIRD_PARTY.md applies.
 
-The default features are `qwen3`, `download` and `cli`. Library consumers can use
-`default-features = false` with `features = ["qwen3"]` for local model directories,
-or add `download` for the verified cache. No-default-features builds expose the
-model-independent core. The `cli` feature enables the backend and downloader;
-Clap, hound and tempfile are excluded from builds that omit `cli`. This ASR backend uses portable Rust CPU inference.
+The default features are `qwen3` and `cli`. Library consumers use
+`default-features = false` with `features = ["qwen3"]` and local model
+directories. No-default-features builds expose the model-independent core and
+the model catalog. The `cli` feature enables the backend; Clap, hound, tempfile,
+ureq and ring are excluded from builds that omit `cli`. This ASR backend uses portable Rust CPU inference.
 
 Each independent Windows/Linux/macOS workflow checks supported feature
 combinations, warning-free API documentation and `cargo publish --dry-run`,
@@ -295,7 +304,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo test --locked --no-default-features
-cargo doc --locked --no-default-features --features qwen3,download --no-deps --lib
+cargo doc --locked --no-default-features --features qwen3 --no-deps --lib
 cargo package --locked --list
 cargo publish --locked --dry-run
 ```
@@ -328,9 +337,13 @@ validate an existing tag with `publish: false` before uploading it.
 - In-memory samples are cut at pauses near the chunk limit, as files were.
 - Errors are the `valle_asr::Error` enum; `Cancelled` is one of its variants.
   anyhow is no longer a dependency.
-- Downloads use ureq and ring, the per-revision lock uses the standard library,
-  and the mel spectrum is a matrix product. A default build on macOS arm64
-  depends on 165 crates, down from 225.
+- The library no longer downloads models: the `download` feature and the
+  `cache` module are gone, and `valle_asr::models` keeps the catalog as data
+  with `ModelSpec::missing` to check a directory offline. The CLI keeps a
+  downloader for development and CI, now on ureq and ring.
+- The mel spectrum is a matrix product. A library build with `qwen3` on macOS
+  arm64 depends on 137 crates, and the default build with the CLI on 165,
+  down from 225.
 - Attention shares key/value heads across query groups without copying them.
 - The output of the CLI is unchanged.
 
