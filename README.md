@@ -286,9 +286,9 @@ Clap, hound and tempfile are excluded from builds that omit `cli`. This ASR back
 Each independent Windows/Linux/macOS workflow checks supported feature
 combinations, warning-free API documentation and `cargo publish --dry-run`,
 which extracts and builds the exact crate archive without uploading it.
-Packaging explicitly includes source, model catalogs, test fixtures and third
-party notices.
-Model weights, generated audio, local artifacts and build caches are excluded.
+Packaging explicitly includes source, the model catalog and third party
+notices. Tests and their audio fixtures stay in the repository, where CI runs
+them. Model weights, local artifacts and build caches are excluded.
 
 ```sh
 cargo fmt --all -- --check

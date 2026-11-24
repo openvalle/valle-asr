@@ -53,7 +53,8 @@ from either crate are copied or vendored here.
 [tests/fixtures/provenance.json](tests/fixtures/provenance.json) records the
 upstream repository and commit, file sizes, SHA-256 hashes and reference text
 for the four copied English/Chinese fixture files. The upstream MIT notice is
-included alongside this provenance in the crate's `third_party/` directory.
+kept in `third_party/`. The fixtures are in the repository only; the published
+crate does not include them.
 
 Long-file regression tests generate sparse sample sources in `tests/support/`.
 Their real speech inserts repeat the existing MIT-licensed `sample1.wav` at
@@ -87,9 +88,9 @@ Use of a dual-licensed dependency selects its permissive license option.
 
 ## Distribution and updates
 
-`Cargo.toml` includes this document, `third_party/`, and fixture provenance in
-the published source archive. Model weights and generated test output are
-downloaded or produced separately and are excluded from that archive.
+`Cargo.toml` includes this document and `third_party/` in the published source
+archive. Tests, their fixtures, model weights and generated test output are
+kept out of it.
 
 When updating dependencies or borrowing code, recheck the actual license,
 record the exact revision and affected files, preserve notices, regenerate the

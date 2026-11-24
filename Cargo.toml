@@ -11,7 +11,7 @@ documentation = "https://docs.rs/valle-asr"
 readme = "README.md"
 keywords = ["speech", "asr", "qwen", "transcription", "timestamps"]
 categories = ["multimedia::audio"]
-include = ["src/**", "tests/**", "third_party/**", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "THIRD_PARTY.md", "models.json"]
+include = ["src/**", "third_party/**", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "THIRD_PARTY.md", "models.json"]
 
 [package.metadata.docs.rs]
 no-default-features = true
