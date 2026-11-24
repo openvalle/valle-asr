@@ -11,9 +11,10 @@ word timestamps. The first backend is **Qwen3-ASR**, paired with
 ## Scope
 
 - Rust **1.99.0**, edition 2024; direct crates use the latest stable releases
-  checked on 2026-10-08, with an exact `Cargo.lock`.
+  checked on 2026-11-24, with an exact `Cargo.lock`.
 - Native CPU inference on Windows, Linux and macOS, each on x86_64 and ARM64,
-  through Candle. Python, libtorch, OpenBLAS and a GPU are not required to
+  through Candle. On macOS, matrix products use the system Accelerate
+  framework. Python, libtorch, OpenBLAS and a GPU are not required to
   transcribe audio.
 - Built-in official Qwen3-ASR 0.6B and ForcedAligner 0.6B downloads. Local
   directories can also load the matching original Qwen3-ASR 1.7B architecture;

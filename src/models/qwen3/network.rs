@@ -14,12 +14,24 @@ use std::{collections::BTreeSet, path::Path};
 #[path = "network_tests.rs"]
 mod tests;
 
+/// Scaled dot-product attention. `k` and `v` may have fewer heads than `q`: each
+/// group of query heads attends to its shared key/value head without copying it.
 fn attention(q: &Tensor, k: &Tensor, v: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
-    let mut scores = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? / (q.dim(3)? as f64).sqrt())?;
+    let (b, heads, s, d) = q.dims4()?;
+    let kv_heads = k.dim(1)?;
+    let groups = heads / kv_heads;
+    let q = q.reshape((b, kv_heads, groups * s, d))?;
+    let mut scores = (q.matmul(&k.transpose(2, 3)?)? / (d as f64).sqrt())?;
     if let Some(mask) = mask {
-        scores = scores.broadcast_add(mask)?;
+        let total = scores.dim(3)?;
+        scores = scores
+            .reshape((b, kv_heads, groups, s, total))?
+            .broadcast_add(&mask.unsqueeze(2)?)?
+            .reshape((b, kv_heads, groups * s, total))?;
     }
-    Ok(candle_nn::ops::softmax_last_dim(&scores)?.matmul(v)?)
+    Ok(candle_nn::ops::softmax_last_dim(&scores)?
+        .matmul(v)?
+        .reshape((b, heads, s, d))?)
 }
 
 struct AudioLayer {
@@ -247,15 +259,7 @@ impl TextLayer {
         if let Some(cache) = cache {
             *cache = Some((k.clone(), v.clone()));
         }
-        let repeats = self.heads / self.kv_heads;
-        let repeat = |t: Tensor| -> Result<Tensor> {
-            let seq = t.dim(2)?;
-            Ok(t.unsqueeze(2)?
-                .expand((b, self.kv_heads, repeats, seq, self.head_dim))?
-                .reshape((b, self.heads, seq, self.head_dim))?
-                .contiguous()?)
-        };
-        let h = attention(&q, &repeat(k)?, &repeat(v)?, mask)?
+        let h = attention(&q, &k, &v, mask)?
             .transpose(1, 2)?
             .contiguous()?
             .reshape((b, s, self.heads * self.head_dim))?;
