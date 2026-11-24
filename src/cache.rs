@@ -1,7 +1,7 @@
 //! Revision-pinned, SHA-256-verified model downloads shared by every backend.
 use anyhow::{Context, Result, bail, ensure};
+use ring::digest::{Context as Sha256, SHA256};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -103,7 +103,7 @@ impl ModelCache {
             .read(true)
             .write(true)
             .open(root.join(".download.lock"))?;
-        fs2::FileExt::lock_exclusive(&lock)?;
+        lock.lock()?;
         for file in &spec.files {
             validate_component(&file.path)?;
             let path = root.join(&file.path);
@@ -142,7 +142,7 @@ impl ModelCache {
                 return Err(error).with_context(|| format!("download {}", file.path));
             }
         }
-        fs2::FileExt::unlock(&lock)?;
+        lock.unlock()?;
         Ok(root)
     }
 }
@@ -169,7 +169,7 @@ fn verify(path: &Path, file: &ModelFile) -> Result<bool> {
     if input.metadata()?.len() != file.bytes {
         return Ok(false);
     }
-    let mut hash = Sha256::new();
+    let mut hash = Sha256::new(&SHA256);
     let mut buffer = vec![0; 1024 * 1024];
     loop {
         let n = input.read(&mut buffer)?;
@@ -178,7 +178,7 @@ fn verify(path: &Path, file: &ModelFile) -> Result<bool> {
         }
         hash.update(&buffer[..n]);
     }
-    Ok(hex(&hash.finalize()) == file.sha256.to_ascii_lowercase())
+    Ok(hex(hash.finish().as_ref()) == file.sha256.to_ascii_lowercase())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -187,12 +187,13 @@ fn hex(bytes: &[u8]) -> String {
 
 fn download(url: &str, path: &Path, file: &ModelFile) -> Result<()> {
     eprintln!("Downloading {} ({} bytes)", file.path, file.bytes);
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(1800))
-        .user_agent("valle-asr/0.1")
-        .build()?;
-    let mut response = client.get(url).send()?.error_for_status()?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(1800)))
+        .user_agent(concat!("valle-asr/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    let mut response = agent.get(url).call()?.into_body().into_reader();
     let partial = path.with_extension(format!(
         "{}.part",
         path.extension()
@@ -200,7 +201,7 @@ fn download(url: &str, path: &Path, file: &ModelFile) -> Result<()> {
             .unwrap_or("download")
     ));
     let mut output = File::create(&partial)?;
-    let mut hash = Sha256::new();
+    let mut hash = Sha256::new(&SHA256);
     let mut bytes = 0u64;
     let mut buffer = vec![0; 1024 * 1024];
     loop {
@@ -217,7 +218,7 @@ fn download(url: &str, path: &Path, file: &ModelFile) -> Result<()> {
         output.write_all(&buffer[..n])?;
         hash.update(&buffer[..n]);
     }
-    if bytes != file.bytes || hex(&hash.finalize()) != file.sha256.to_ascii_lowercase() {
+    if bytes != file.bytes || hex(hash.finish().as_ref()) != file.sha256.to_ascii_lowercase() {
         bail!(
             "size/SHA-256 mismatch for {}; partial file will not be used",
             file.path
@@ -249,7 +250,7 @@ mod tests {
             files: vec![ModelFile {
                 path: "weights.bin".into(),
                 bytes: 3,
-                sha256: hex(&Sha256::digest(b"abc")),
+                sha256: hex(ring::digest::digest(&SHA256, b"abc").as_ref()),
             }],
         };
         assert!(cache.ensure(&spec, true).is_err());

@@ -27,7 +27,7 @@ required-features = ["cli"]
 default = ["qwen3", "download", "cli"]
 cli = ["dep:clap", "qwen3", "download"]
 qwen3 = ["dep:candle-core", "dep:candle-nn", "dep:memmap2", "dep:safetensors", "dep:tokenizers"]
-download = ["dep:reqwest", "dep:sha2", "dep:fs2"]
+download = ["dep:ureq", "dep:ring"]
 
 [dependencies]
 anyhow = "1.0.105"
@@ -40,9 +40,8 @@ hound = "3.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
-reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"], optional = true }
-sha2 = { version = "0.11.1", optional = true }
-fs2 = { version = "0.4.3", optional = true }
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"], optional = true }
+ring = { version = "0.17.14", optional = true }
 tempfile = "3.27.0"
 
 # Apple's Accelerate framework runs the CPU matrix products on macOS.
