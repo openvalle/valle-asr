@@ -38,7 +38,7 @@ license file above. No upstream ASR runtime, C inference source or inference
 binary is bundled or linked into this crate.
 
 The CPU weight backend in `src/models/qwen3/weights.rs` is new Valle code using
-Candle 0.11.0's public `SimpleBackend`, memmap2 0.9.11's portable mapping API and
+Candle 0.11.1's public `SimpleBackend`, memmap2 0.9.12's portable mapping API and
 safetensors 0.8.0's validated metadata API. Per-tensor mappings are released
 after loading each weight. These dependencies use MIT/Apache-2.0 licenses and
 were already present transitively. Its direct
@@ -77,7 +77,7 @@ The official Apache-2.0 text is preserved in
 ## Rust dependencies
 
 `Cargo.lock` records the exact resolved dependency versions. Direct dependencies
-were checked against the latest stable crates.io releases on 2026-10-08.
+were checked against the latest stable crates.io releases on 2026-11-24.
 Transitive versions are determined by the latest upstream crates' constraints.
 `third_party/crates.json` records crate names, versions, SPDX licenses and source
 repositories for external dependencies across the six Linux, Windows and macOS
