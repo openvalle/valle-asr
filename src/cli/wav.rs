@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use crate::Result;
 use hound::{Sample, SampleFormat, WavReader, WavSpec};
 use std::{
     fs::File,
@@ -29,8 +29,9 @@ impl Wav {
     /// Rejects empty, truncated or unsupported WAV data, and filesystem
     /// failures. RF64 and compressed audio are unsupported.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let reader = WavReader::open(path.as_ref())
-            .with_context(|| format!("open WAV {}", path.as_ref().display()))?;
+        let path = path.as_ref();
+        let reader =
+            WavReader::open(path).map_err(|e| format!("open WAV {}: {e}", path.display()))?;
         let spec = reader.spec();
         ensure!(spec.channels > 0, "WAV has no channels");
         // Bound both source-rate buffers and resampling filter width, including
@@ -52,7 +53,7 @@ impl Wav {
         // payload. Retain the actual container width, including 24 bits in a
         // 32-bit container, rather than deriving seeks from valid sample bits.
         input.seek(SeekFrom::Start(
-            data_start.checked_sub(4).context("WAV data header")?,
+            data_start.checked_sub(4).ok_or("invalid WAV data header")?,
         ))?;
         let mut bytes = [0; 4];
         input.read_exact(&mut bytes)?;

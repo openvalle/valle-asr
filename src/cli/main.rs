@@ -1,7 +1,19 @@
+/// The CLI reports any error as its message and the chain of its sources.
+type Result<T, E = valle_asr::BoxError> = std::result::Result<T, E>;
+
+/// Return the message as an error unless `condition` holds.
+macro_rules! ensure {
+    ($condition:expr, $($message:tt)+) => {
+        let holds: bool = $condition;
+        if !holds {
+            return Err(format!($($message)+).into());
+        }
+    };
+}
+
 mod json;
 mod wav;
 
-use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use std::{
     io::BufWriter,
@@ -67,13 +79,27 @@ fn cache(root: Option<PathBuf>) -> Result<valle_asr::cache::ModelCache> {
     }))
 }
 
-fn main() -> Result<()> {
-    match Cli::parse().command {
+fn main() -> std::process::ExitCode {
+    let Err(error) = run(Cli::parse()) else {
+        return std::process::ExitCode::SUCCESS;
+    };
+    let mut message = format!("error: {error}");
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(&format!("\n  caused by: {cause}"));
+        source = cause.source();
+    }
+    eprintln!("{message}");
+    std::process::ExitCode::FAILURE
+}
+
+fn run(cli: Cli) -> Result<()> {
+    match cli.command {
         Command::Models => {
             #[cfg(feature = "download")]
             println!("{}",serde_json::to_string_pretty(&valle_asr::cache::builtin_models().iter().map(|m|serde_json::json!({"id":m.id,"repository":m.repository,"revision":m.revision,"license":m.license})).collect::<Vec<_>>())?);
             #[cfg(not(feature = "download"))]
-            bail!("model catalog requires the download feature");
+            return Err("model catalog requires the download feature".into());
         }
         Command::Download {
             model,
@@ -91,7 +117,7 @@ fn main() -> Result<()> {
             #[cfg(not(feature = "download"))]
             {
                 let _ = (model, cache_dir, offline);
-                bail!("downloads are disabled");
+                return Err("downloads are disabled".into());
             }
         }
         Command::Transcribe {
@@ -114,9 +140,10 @@ fn main() -> Result<()> {
                 use valle_asr::{
                     AsrEngine, TimestampMode, TranscribeOptions, models::qwen3::Qwen3,
                 };
-                if !model.starts_with("qwen3-asr-") {
-                    bail!("unsupported model family: {model}");
-                }
+                ensure!(
+                    model.starts_with("qwen3-asr-"),
+                    "unsupported model family: {model}"
+                );
                 #[cfg(feature = "download")]
                 let (model_dir, aligner_dir) = {
                     let cache = cache(cache_dir)?;
@@ -141,9 +168,7 @@ fn main() -> Result<()> {
                 let (model_dir, aligner_dir) = {
                     let _ = (cache_dir, offline);
                     (
-                        model_dir.ok_or_else(|| {
-                            anyhow::anyhow!("--model-dir is required without downloads")
-                        })?,
+                        model_dir.ok_or("--model-dir is required without downloads")?,
                         aligner_dir,
                     )
                 };
@@ -202,7 +227,7 @@ fn main() -> Result<()> {
                     context,
                     output,
                 );
-                bail!("Qwen3 backend is disabled");
+                return Err("Qwen3 backend is disabled".into());
             }
         }
     }

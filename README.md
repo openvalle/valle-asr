@@ -108,7 +108,7 @@ Model weights are downloaded separately and are not embedded in the crate.
 
 ```rust,no_run
 # #[cfg(feature = "qwen3")]
-# fn main() -> anyhow::Result<()> {
+# fn main() -> valle_asr::Result<()> {
 use valle_asr::{AsrEngine, TranscribeOptions, models::qwen3::Qwen3};
 
 let mut engine = AsrEngine::new();
@@ -140,6 +140,16 @@ inside the audio. Backends read the same samples and return the same
 model-independent result types. Qwen is optional:
 `cargo check --no-default-features --lib` builds the core API alone.
 
+### Errors
+
+Every fallible call returns `valle_asr::Result<T>`, whose error is the
+`valle_asr::Error` enum. Match on its variants: `Cancelled`, `UnknownModel`,
+`MissingModel` (an offline cache without the model), `Download`, `Language`,
+`Invalid` (options, samples or arguments), `Audio` and `Sink` (holding the
+error your source or sink returned), `Model` (loading or inference) and `Io`.
+The enum is non-exhaustive. Sources and sinks return
+`Result<_, valle_asr::BoxError>`, so they can fail with their own error types.
+
 ### Cancellation
 
 Keep a clone of the request's `CancellationToken` in the UI or controlling
@@ -169,9 +179,8 @@ generating tokens. Both ASR and alignment passes check the flag, so word
 transcription can stop before its first result callback. Standalone alignment
 can use `Qwen3::align_with_cancellation`; `align` retains its original behavior.
 
-A cancelled request returns an error identifiable with
-`error.is::<valle_asr::Cancelled>()`, including when error context is attached;
-it never reports successful partial output. Already delivered sink chunks
+A cancelled request returns `Error::Cancelled` and never reports successful
+partial output. Already delivered sink chunks
 cannot be retracted. Call a transactional output writer's `finish()` only after
 successful inference, and reuse the backend with a fresh token after cancellation.
 Custom backends must check the token during their own compute; the engine also

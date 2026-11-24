@@ -1,8 +1,8 @@
 use super::{Qwen3, text};
 use crate::{
-    AudioSource, Segment, TimestampMode, TranscribeOptions, audio::duration_ms, chunks::Chunks,
+    AudioSource, Error, Result, Segment, TimestampMode, TranscribeOptions, audio::duration_ms,
+    chunks::Chunks, error::ensure,
 };
-use anyhow::{Context, Result, ensure};
 
 fn audible_bounds(samples: &[f32]) -> Option<std::ops::Range<usize>> {
     let start = samples.iter().position(|sample| *sample != 0.0)?;
@@ -57,7 +57,7 @@ impl Qwen3 {
         if options.timestamps == TimestampMode::Word {
             ensure!(
                 self.aligner_dir.is_some(),
-                "word timestamps require Qwen3-ForcedAligner"
+                Error::invalid("word timestamps require a Qwen3-ForcedAligner model")
             );
         }
         let mut chunks = Chunks::new(audio, options.chunk_seconds);
@@ -89,14 +89,12 @@ impl Qwen3 {
             let samples = chunks.read(record.start, record.samples)?;
             let offset_ms = if let Some(bounds) = audible_bounds(&samples) {
                 let offset = duration_ms(record.start + bounds.start as u64);
-                record.segment.words = self
-                    .align_chunk(
-                        &samples[bounds],
-                        &record.segment.text,
-                        &record.segment.language,
-                        &options.cancellation,
-                    )
-                    .with_context(|| format!("align at {} ms", record.segment.start_ms))?;
+                record.segment.words = self.align_chunk(
+                    &samples[bounds],
+                    &record.segment.text,
+                    &record.segment.language,
+                    &options.cancellation,
+                )?;
                 offset
             } else {
                 record.segment.start_ms

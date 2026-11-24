@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use crate::BoxError;
 
 /// Sample rate of every input, in hertz. Sources are mono f32 PCM at this rate.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -16,8 +16,9 @@ pub trait AudioSource {
     /// and within `[-1, 1]`; recognition rejects any other value.
     ///
     /// # Errors
-    /// Returns an error when the samples cannot be read.
-    fn read(&mut self, start: u64, out: &mut [f32]) -> Result<()>;
+    /// Returns the source's own error when the samples cannot be read; the
+    /// request fails with [`crate::Error::Audio`] holding it.
+    fn read(&mut self, start: u64, out: &mut [f32]) -> Result<(), BoxError>;
 }
 
 impl AudioSource for &[f32] {
@@ -25,13 +26,12 @@ impl AudioSource for &[f32] {
         self.len() as u64
     }
 
-    fn read(&mut self, start: u64, out: &mut [f32]) -> Result<()> {
-        let start = usize::try_from(start)?;
-        let end = start + out.len();
-        out.copy_from_slice(
-            self.get(start..end)
-                .context("read past the end of the samples")?,
-        );
+    fn read(&mut self, start: u64, out: &mut [f32]) -> Result<(), BoxError> {
+        let samples = usize::try_from(start)
+            .ok()
+            .and_then(|start| self.get(start..start.checked_add(out.len())?))
+            .ok_or("read past the end of the samples")?;
+        out.copy_from_slice(samples);
         Ok(())
     }
 }

@@ -1,6 +1,5 @@
 //! Whisper-compatible frontend: periodic Hann, reflected STFT, Slaney mel scale.
-use crate::CancellationToken;
-use anyhow::Result;
+use crate::{CancellationToken, Result};
 use candle_core::{Device, Tensor};
 pub(super) fn mel(samples: &[f32], cancellation: &CancellationToken) -> Result<Tensor> {
     cancellation.check()?;

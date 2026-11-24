@@ -1,5 +1,4 @@
-use crate::CancellationToken;
-use anyhow::{Result, ensure};
+use crate::{CancellationToken, Error, Result, error::ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -95,7 +94,7 @@ pub struct TranscribeOptions {
     /// Optional domain/context text included in the system prompt.
     pub context: String,
     /// Shared stop signal, checked during decoding, inference and word alignment.
-    /// Cancellation returns [`crate::Cancelled`]; create a new token for each request.
+    /// Cancellation returns [`crate::Error::Cancelled`]; create a new token for each request.
     pub cancellation: CancellationToken,
 }
 
@@ -117,9 +116,12 @@ impl TranscribeOptions {
         self.cancellation.check()?;
         ensure!(
             (1..=30).contains(&self.chunk_seconds),
-            "chunk_seconds must be 1..=30"
+            Error::invalid("chunk_seconds must be 1..=30")
         );
-        ensure!(self.max_new_tokens > 0, "max_new_tokens must be positive");
+        ensure!(
+            self.max_new_tokens > 0,
+            Error::invalid("max_new_tokens must be positive")
+        );
         Ok(())
     }
 }

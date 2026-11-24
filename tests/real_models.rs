@@ -1,15 +1,15 @@
 //! CI invokes this ignored test explicitly on every supported OS. Missing models
 //! fail the test; it never silently skips inference.
 #![cfg(all(feature = "qwen3", feature = "download"))]
-use anyhow::{Context, Result, ensure};
+#[macro_use]
 mod support;
 use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use support::{SparseSource, fixture};
+use support::{Result, SparseSource, fixture};
 use valle_asr::{
-    AsrModel, AudioSource, CancellationToken, Cancelled, Segment, TranscribeOptions,
+    AsrEngine, AsrModel, AudioSource, CancellationToken, Error, Segment, TranscribeOptions,
     cache::{ModelCache, builtin_model},
     models::qwen3::Qwen3,
 };
@@ -112,7 +112,7 @@ fn save(name: &str, result: &[Segment]) -> Result<()> {
 fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
     let started = Instant::now();
     let root = std::env::var_os("VALLE_ASR_TEST_CACHE")
-        .context("VALLE_ASR_TEST_CACHE must point to verified models")?;
+        .ok_or("VALLE_ASR_TEST_CACHE must point to verified models")?;
     let cache = ModelCache::new(root);
     let model = cache.ensure(&builtin_model("qwen3-asr-0.6b")?, true)?;
     let aligner = cache.ensure(&builtin_model("qwen3-forced-aligner-0.6b")?, true)?;
@@ -141,7 +141,7 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
     })
     .unwrap_err();
     ensure!(
-        cancelled.is::<Cancelled>() && callbacks == 0,
+        matches!(cancelled, Error::Cancelled) && callbacks == 0,
         "first-pass cancellation was delayed until the result sink: {cancelled}"
     );
     eprintln!("[test] first ASR pass cancelled without waiting for a result callback");
@@ -181,7 +181,7 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
     })
     .unwrap_err();
     ensure!(
-        cancelled.is::<Cancelled>(),
+        matches!(cancelled, Error::Cancelled),
         "alignment cancellation lost its error type: {cancelled}"
     );
     ensure!(
@@ -228,10 +228,12 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
     };
     let long_started = Instant::now();
     let mut speech_segments = 0;
-    let mut segment_count = 0;
     let mut previous_word_end = 0;
     let mut previous_end = 0;
-    backend.transcribe(
+    let mut engine = AsrEngine::new();
+    engine.register(backend)?;
+    let summary = engine.transcribe_source(
+        "qwen3-asr-0.6b",
         &mut long_source,
         &TranscribeOptions {
             language: Some("en".into()),
@@ -240,7 +242,6 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
         &mut |segment| {
             ensure!(segment.start_ms == previous_end, "long-file timeline gap");
             previous_end = segment.end_ms;
-            segment_count += 1;
             if !segment.text.is_empty() {
                 let cer = error_rate(&reference, &segment.text);
                 ensure!(cer <= 0.15, "long-file speech CER {cer}: {}", segment.text);
@@ -274,14 +275,20 @@ fn qwen3_transcription_and_learned_word_timestamps() -> Result<()> {
         },
     )?;
     ensure!(
-        speech_segments == 2 && segment_count == 240,
+        speech_segments == 2 && summary.segment_count == 240,
         "long-file speech/chunk count mismatch"
     );
-    ensure!(previous_end == 7_200_000, "long-file duration changed");
+    ensure!(
+        previous_end == 7_200_000 && summary.duration_ms == 7_200_000,
+        "long-file duration changed"
+    );
     receipts.push(serde_json::json!({"case":"two-hour-stream","duration_ms":previous_end,
-        "segments":segment_count,"speech_segments":speech_segments,
+        "segments":summary.segment_count,"speech_segments":speech_segments,
         "seconds":long_started.elapsed().as_secs_f64(),"mostly_digital_silence":true,"word_offset_passed":true}));
-    println!("two-hour source: {segment_count} segments, {speech_segments} with speech");
+    println!(
+        "two-hour source: {} segments, {speech_segments} with speech",
+        summary.segment_count
+    );
     std::fs::write(
         "artifacts/receipt.json",
         serde_json::to_vec_pretty(

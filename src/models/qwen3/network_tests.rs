@@ -19,8 +19,9 @@ fn model() -> Result<Network> {
                 "max_position_embeddings": 64, "tie_word_embeddings": false
             }
         }
-    }))?;
-    config.validate()?;
+    }))
+    .map_err(Error::model)?;
+    config.validate().map_err(Error::model)?;
     let mut weights = HashMap::new();
     for (name, rows, cols) in [
         ("self_attn.q_proj", 4, 4),
@@ -142,25 +143,19 @@ fn cancelled_encoder_decoder_and_classifier_keep_model_reusable() -> Result<()> 
     let model = model()?;
     let token = CancellationToken::default();
     token.cancel();
-    assert!(
-        model
-            .audio(&[0.0; 1600], &token)
-            .unwrap_err()
-            .is::<crate::Cancelled>()
-    );
+    assert!(matches!(
+        model.audio(&[0.0; 1600], &token),
+        Err(Error::Cancelled)
+    ));
     let x = input()?;
-    assert!(
-        model
-            .decode(&x, 0, &mut model.cache(), true, &token)
-            .unwrap_err()
-            .is::<crate::Cancelled>()
-    );
-    assert!(
-        model
-            .classify_positions(&x, &[0], &token)
-            .unwrap_err()
-            .is::<crate::Cancelled>()
-    );
+    assert!(matches!(
+        model.decode(&x, 0, &mut model.cache(), true, &token),
+        Err(Error::Cancelled)
+    ));
+    assert!(matches!(
+        model.classify_positions(&x, &[0], &token),
+        Err(Error::Cancelled)
+    ));
     let active = CancellationToken::default();
     let complete = model.decode(&x, 0, &mut model.cache(), false, &active)?;
     let selected = model.classify_positions(&x, &[0], &active)?;

@@ -1,5 +1,6 @@
-use anyhow::{Result, ensure};
+use crate::{Error, Result};
 use serde::Deserialize;
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct Config {
@@ -53,42 +54,48 @@ pub(super) struct TextConfig {
 }
 
 impl Config {
-    pub fn validate(&self) -> Result<()> {
+    pub fn read(root: &Path) -> Result<Self> {
+        let path = root.join("config.json");
+        let bytes = std::fs::read(&path).map_err(Error::io(&path))?;
+        let config: Self = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::model(format!("{}: {e}", path.display())))?;
+        config
+            .validate()
+            .map_err(|e| Error::model(format!("{}: {e}", path.display())))?;
+        Ok(config)
+    }
+
+    pub(super) fn validate(&self) -> Result<(), &'static str> {
         let a = &self.thinker_config.audio_config;
         let t = &self.thinker_config.text_config;
-        ensure!(
-            a.num_mel_bins == 128,
-            "Qwen3 frontend requires 128 mel bins"
-        );
-        ensure!(
-            a.d_model > 0
-                && a.encoder_attention_heads > 0
-                && a.d_model.is_multiple_of(a.encoder_attention_heads),
-            "invalid encoder dimensions"
-        );
-        ensure!(
-            a.n_window == 50 && a.n_window_infer >= 100 && a.n_window_infer.is_multiple_of(100),
-            "unsupported audio window layout"
-        );
-        ensure!(
-            a.output_dim == t.hidden_size,
-            "audio/text projection dimensions differ"
-        );
-        ensure!(
-            t.num_key_value_heads > 0
-                && t.num_attention_heads.is_multiple_of(t.num_key_value_heads)
-                && t.head_dim > 0
-                && t.head_dim.is_multiple_of(2),
-            "invalid decoder dimensions"
-        );
-        ensure!(
-            t.num_hidden_layers > 0 && t.max_position_embeddings > 0,
-            "invalid decoder length"
-        );
-        ensure!(
-            t.rope_theta.is_finite() && t.rope_theta > 0.0 && t.rms_norm_eps > 0.0,
-            "invalid decoder normalization"
-        );
+        if !(a.num_mel_bins == 128) {
+            return Err("Qwen3 frontend requires 128 mel bins");
+        }
+        if !(a.d_model > 0
+            && a.encoder_attention_heads > 0
+            && a.d_model.is_multiple_of(a.encoder_attention_heads))
+        {
+            return Err("invalid encoder dimensions");
+        }
+        if !(a.n_window == 50 && a.n_window_infer >= 100 && a.n_window_infer.is_multiple_of(100)) {
+            return Err("unsupported audio window layout");
+        }
+        if !(a.output_dim == t.hidden_size) {
+            return Err("audio/text projection dimensions differ");
+        }
+        if !(t.num_key_value_heads > 0
+            && t.num_attention_heads.is_multiple_of(t.num_key_value_heads)
+            && t.head_dim > 0
+            && t.head_dim.is_multiple_of(2))
+        {
+            return Err("invalid decoder dimensions");
+        }
+        if !(t.num_hidden_layers > 0 && t.max_position_embeddings > 0) {
+            return Err("invalid decoder length");
+        }
+        if !(t.rope_theta.is_finite() && t.rope_theta > 0.0 && t.rms_norm_eps > 0.0) {
+            return Err("invalid decoder normalization");
+        }
         Ok(())
     }
 }

@@ -30,7 +30,6 @@ qwen3 = ["dep:candle-core", "dep:candle-nn", "dep:memmap2", "dep:safetensors", "
 download = ["dep:ureq", "dep:ring"]
 
 [dependencies]
-anyhow = "1.0.105"
 candle-core = { version = "0.11.1", default-features = false, optional = true }
 candle-nn = { version = "0.11.1", default-features = false, optional = true }
 memmap2 = { version = "0.9.12", optional = true }
@@ -39,6 +38,7 @@ clap = { version = "4.6.9", features = ["derive"], optional = true }
 hound = { version = "3.5.1", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+thiserror = "2.0.21"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"], optional = true }
 ureq = { version = "3.5.1", default-features = false, features = ["rustls"], optional = true }
 ring = { version = "0.17.14", optional = true }

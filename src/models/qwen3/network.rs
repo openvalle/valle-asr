@@ -1,8 +1,7 @@
 //! Native Candle inference, following the official Apache-2.0 Qwen architecture.
 //! See THIRD_PARTY.md for the pinned architecture and Rust reference sources.
 use super::config::{AudioConfig, Config, TextConfig};
-use crate::CancellationToken;
-use anyhow::{Context, Result, ensure};
+use crate::{CancellationToken, Error, Result, error::ensure};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{
     Conv2d, Conv2dConfig, LayerNorm, Linear, Module, RmsNorm, VarBuilder, layer_norm, linear,
@@ -292,20 +291,19 @@ pub(super) struct Network {
 impl Network {
     pub fn load(root: &Path, cancellation: &CancellationToken) -> Result<Self> {
         cancellation.check()?;
-        let config: Config = serde_json::from_slice(&std::fs::read(root.join("config.json"))?)?;
-        config.validate()?;
+        let config = Config::read(root)?;
         let index = root.join("model.safetensors.index.json");
         let paths = if index.exists() {
-            let d: serde_json::Value = serde_json::from_slice(&std::fs::read(index)?)?;
-            let map = d["weight_map"]
-                .as_object()
-                .context("invalid safetensors shard index")?;
+            let invalid = || Error::model(format!("invalid shard index {}", index.display()));
+            let bytes = std::fs::read(&index).map_err(Error::io(&index))?;
+            let d: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let map = d["weight_map"].as_object().ok_or_else(invalid)?;
             let mut names = BTreeSet::new();
             for name in map.values() {
-                let name = name.as_str().context("invalid shard filename")?;
+                let name = name.as_str().ok_or_else(invalid)?;
                 ensure!(
                     Path::new(name).file_name().and_then(|s| s.to_str()) == Some(name),
-                    "unsafe shard filename"
+                    invalid()
                 );
                 names.insert(root.join(name));
             }
@@ -400,7 +398,7 @@ impl Network {
         let t = &self.config.thinker_config.text_config;
         ensure!(
             offset + seq <= t.max_position_embeddings,
-            "decoder context limit exceeded"
+            Error::model("decoder context limit exceeded")
         );
         // Audio uses one-dimensional positions on all three MRoPE axes. The
         // resulting cos/sin are ordinary RoPE, including interleaved MRoPE.

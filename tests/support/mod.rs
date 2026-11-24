@@ -1,7 +1,18 @@
 #![allow(dead_code)]
-use anyhow::{Result, ensure};
 use std::path::Path;
-use valle_asr::{AudioSource, SAMPLE_RATE};
+use valle_asr::{AudioSource, BoxError, SAMPLE_RATE};
+
+pub type Result<T = (), E = BoxError> = std::result::Result<T, E>;
+
+/// Return the message as an error unless `condition` holds.
+macro_rules! ensure {
+    ($condition:expr, $($message:tt)+) => {
+        let holds: bool = $condition;
+        if !holds {
+            return Err(format!($($message)+).into());
+        }
+    };
+}
 
 /// Digital silence of any length with a few clips of sound inserted, so a
 /// two-hour source needs no duration-sized vector or large checked-in binary.
@@ -15,7 +26,7 @@ impl AudioSource for SparseSource {
         self.samples
     }
 
-    fn read(&mut self, start: u64, out: &mut [f32]) -> Result<()> {
+    fn read(&mut self, start: u64, out: &mut [f32]) -> Result {
         ensure!(
             start + out.len() as u64 <= self.samples,
             "read past the end"

@@ -7,10 +7,9 @@ mod text;
 mod weights;
 
 use crate::{
-    AsrModel, AudioSource, CancellationToken, ModelInfo, SAMPLE_RATE, Segment, TranscribeOptions,
-    Word, audio::duration_ms,
+    AsrModel, AudioSource, CancellationToken, Error, ModelInfo, Result, SAMPLE_RATE, Segment,
+    TranscribeOptions, Word, audio::duration_ms, error::ensure,
 };
-use anyhow::{Context, Result, bail, ensure};
 use candle_core::Tensor;
 use network::Network;
 use std::{
@@ -44,20 +43,22 @@ impl Qwen3 {
     /// supplies an engine ID; it does not select a checkpoint architecture.
     ///
     /// # Errors
-    /// Rejects unreadable or unsupported configuration/tokenizers, including
-    /// an aligner checkpoint passed as the ASR directory. No files are downloaded.
+    /// Returns [`Error::Io`] for unreadable files and [`Error::Model`] for
+    /// unsupported configuration or tokenizers, including an aligner checkpoint
+    /// passed as the ASR directory. No files are downloaded.
     pub fn load(
         id: impl Into<String>,
         model_dir: impl AsRef<Path>,
         aligner_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let model_dir = model_dir.as_ref().to_path_buf();
-        let config: config::Config =
-            serde_json::from_slice(&std::fs::read(model_dir.join("config.json"))?)?;
-        config.validate()?;
+        let config = config::Config::read(&model_dir)?;
         ensure!(
             config.thinker_config.classify_num.is_none(),
-            "ASR path points to a forced aligner"
+            Error::model(format!(
+                "{} is a forced aligner, not an ASR model",
+                model_dir.display()
+            ))
         );
         let aligner_tokenizer = aligner_dir
             .as_ref()
@@ -88,23 +89,26 @@ impl Qwen3 {
             self.resident = None; // release old weights before allocating the new model
             let path = match kind {
                 Kind::Asr => &self.model_dir,
-                Kind::Aligner => self
-                    .aligner_dir
-                    .as_ref()
-                    .context("word timestamps require a Qwen3-ForcedAligner model")?,
+                Kind::Aligner => self.aligner_dir.as_ref().ok_or_else(|| {
+                    Error::invalid("word timestamps require a Qwen3-ForcedAligner model")
+                })?,
             };
             let loaded = Network::load(path, cancellation);
             // Candle weight errors erase their inner type; preserve our public
             // cancellation marker when a loading checkpoint aborted the request.
             cancellation.check()?;
-            let network = loaded.with_context(|| format!("load {}", path.display()))?;
+            let network = loaded?;
             ensure!(
                 (kind == Kind::Aligner) == network.config.thinker_config.classify_num.is_some(),
-                "incorrect model kind"
+                Error::model(format!("{} is the wrong kind of model", path.display()))
             );
             self.resident = Some((kind, network));
         }
-        Ok(&self.resident.as_ref().context("missing model session")?.1)
+        Ok(&self
+            .resident
+            .as_ref()
+            .expect("model session was just loaded")
+            .1)
     }
 
     fn transcribe_chunk(
@@ -143,9 +147,7 @@ impl Qwen3 {
             options.cancellation.check()?;
             let next = logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?;
             if [151643, 151645].contains(&next) {
-                let decoded = tok
-                    .decode(&output, false)
-                    .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+                let decoded = tok.decode(&output, false).map_err(Error::model)?;
                 return text::parse_output(&decoded, options.language.as_deref());
             }
             output.push(next);
@@ -159,9 +161,9 @@ impl Qwen3 {
                 )?;
             }
         }
-        bail!(
-            "Qwen3 decode reached max_new_tokens without an end token; increase the limit or shorten chunks"
-        )
+        Err(Error::model(
+            "decoding reached max_new_tokens without an end token; increase the limit or shorten chunks",
+        ))
     }
 
     /// Align a known transcript to a clip of at most 30 seconds of mono 16 kHz
@@ -171,8 +173,9 @@ impl Qwen3 {
     /// Chinese/Cantonese units are Han characters.
     ///
     /// # Errors
-    /// Rejects clips over 30 seconds, unsupported alignment languages, missing
-    /// aligner weights, and failed model loading or inference.
+    /// Returns [`Error::Invalid`] for clips over 30 seconds, invalid samples
+    /// and a missing aligner, [`Error::Language`] for languages the aligner
+    /// does not support, and [`Error::Model`] for failed loading or inference.
     pub fn align(
         &mut self,
         samples: &[f32],
@@ -186,7 +189,7 @@ impl Qwen3 {
     /// Checks occur between preprocessing steps and encoder/classifier layers.
     ///
     /// # Errors
-    /// Returns [`crate::Cancelled`] on cancellation, or the same validation,
+    /// Returns [`Error::Cancelled`] on cancellation, or the same validation,
     /// loading and inference errors as [`Self::align`].
     pub fn align_with_cancellation(
         &mut self,
@@ -198,13 +201,13 @@ impl Qwen3 {
         cancellation.check()?;
         ensure!(
             samples.len() <= 30 * SAMPLE_RATE as usize,
-            "alignment clips must be at most 30 seconds"
+            Error::invalid("alignment clips must be at most 30 seconds")
         );
         ensure!(
             samples
                 .iter()
                 .all(|v| v.is_finite() && (-1.0..=1.0).contains(v)),
-            "samples must be finite and within [-1, 1]"
+            Error::invalid("samples must be finite and within [-1, 1]")
         );
         let words = self.align_chunk(samples, transcript, language, cancellation)?;
         cancellation.check()?;
@@ -227,7 +230,9 @@ impl Qwen3 {
         // label character/whitespace heuristics as official word segmentation.
         ensure!(
             !["Japanese", "Korean"].contains(&language.as_str()),
-            "Japanese/Korean word alignment is not implemented yet"
+            Error::Language(format!(
+                "{language} word timestamps are not implemented; transcribe text only"
+            ))
         );
         let words = text::words(transcript);
         if words.is_empty() {
@@ -236,7 +241,7 @@ impl Qwen3 {
         let tok = self
             .aligner_tokenizer
             .clone()
-            .context("word timestamps require an aligner tokenizer")?;
+            .ok_or_else(|| Error::invalid("word timestamps require a Qwen3-ForcedAligner model"))?;
         let network = self.session(Kind::Aligner, cancellation)?;
         ensure!(
             network
@@ -244,16 +249,16 @@ impl Qwen3 {
                 .support_languages
                 .iter()
                 .any(|v| v.eq_ignore_ascii_case(&language)),
-            "aligner does not support {language}"
+            Error::Language(format!(
+                "{language} word timestamps are not supported; transcribe text only"
+            ))
         );
-        let timestamp = network
-            .config
-            .timestamp_token_id
-            .context("aligner has no timestamp token")?;
-        let tick = network
-            .config
-            .timestamp_segment_time
-            .context("aligner has no timestamp resolution")?;
+        let (Some(timestamp), Some(tick)) = (
+            network.config.timestamp_token_id,
+            network.config.timestamp_segment_time,
+        ) else {
+            return Err(Error::model("aligner has no timestamp token or resolution"));
+        };
         let audio = network.audio(samples, cancellation)?;
         let c = &network.config.thinker_config;
         let mut ids = vec![c.audio_start_token_id];
@@ -264,9 +269,9 @@ impl Qwen3 {
         for word in &words {
             cancellation.check()?;
             ids.extend(text::encode(&tok, word)?);
-            positions.push(u32::try_from(ids.len())?);
+            positions.push(u32::try_from(ids.len()).map_err(Error::model)?);
             ids.push(timestamp);
-            positions.push(u32::try_from(ids.len())?);
+            positions.push(u32::try_from(ids.len()).map_err(Error::model)?);
             ids.push(timestamp);
         }
         let x = splice(network, &ids, audio_start, &audio)?;

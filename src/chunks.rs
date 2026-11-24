@@ -1,5 +1,4 @@
-use crate::{AudioSource, CancellationToken, SAMPLE_RATE};
-use anyhow::{Result, ensure};
+use crate::{AudioSource, CancellationToken, Error, Result, SAMPLE_RATE, error::ensure};
 
 /// One interval of a source, in samples on its 16 kHz timeline.
 pub(crate) struct Chunk {
@@ -45,12 +44,14 @@ impl<'a> Chunks<'a> {
     /// Read `count` samples from `start` again, for a second pass over a chunk.
     pub fn read(&mut self, start: u64, count: usize) -> Result<Vec<f32>> {
         let mut samples = vec![0.0; count];
-        self.source.read(start, &mut samples)?;
+        self.source
+            .read(start, &mut samples)
+            .map_err(Error::Audio)?;
         ensure!(
             samples
                 .iter()
                 .all(|v| v.is_finite() && (-1.0..=1.0).contains(v)),
-            "samples must be finite and within [-1, 1]"
+            Error::invalid("samples must be finite and within [-1, 1]")
         );
         Ok(samples)
     }

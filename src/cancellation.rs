@@ -1,23 +1,8 @@
-use std::{
-    error::Error,
-    fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use crate::{Error, Result};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
-
-/// A cooperative cancellation returned instead of a successful partial result.
-/// Use `anyhow::Error::is::<Cancelled>()` to recognize it through error context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cancelled;
-
-impl fmt::Display for Cancelled {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("operation cancelled")
-    }
-}
-impl Error for Cancelled {}
 
 /// A cloneable, thread-safe stop signal shared by a request and its caller.
 /// Cancellation is permanent for every clone. Use a new token for a new request.
@@ -45,10 +30,10 @@ impl CancellationToken {
     /// Check a cooperative cancellation point.
     ///
     /// # Errors
-    /// Returns [`Cancelled`] when the shared stop flag is set.
-    pub fn check(&self) -> Result<(), Cancelled> {
+    /// Returns [`Error::Cancelled`] when the shared stop flag is set.
+    pub fn check(&self) -> Result<()> {
         if self.is_cancelled() {
-            Err(Cancelled)
+            Err(Error::Cancelled)
         } else {
             Ok(())
         }
@@ -67,16 +52,16 @@ mod tests {
         std::thread::spawn(move || flag.store(true, Ordering::Release))
             .join()
             .unwrap();
-        assert_eq!(worker.check(), Err(Cancelled));
-        assert_eq!(token.check(), Err(Cancelled));
+        assert!(matches!(worker.check(), Err(Error::Cancelled)));
+        assert!(matches!(token.check(), Err(Error::Cancelled)));
 
         let flag = Arc::new(AtomicBool::new(false));
         CancellationToken::from_shared_flag(flag.clone()).cancel();
         assert!(flag.load(Ordering::Acquire));
-        assert_eq!(
+        assert!(matches!(
             CancellationToken::from_shared_flag(flag).check(),
-            Err(Cancelled)
-        );
+            Err(Error::Cancelled)
+        ));
         assert!(CancellationToken::default().check().is_ok());
     }
 }

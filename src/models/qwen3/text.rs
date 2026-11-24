@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use crate::{Error, Result, error::ensure};
 use std::path::Path;
 use tokenizers::{
     AddedToken, SplitDelimiterBehavior, Tokenizer,
@@ -12,20 +12,21 @@ use tokenizers::{
 };
 
 pub(super) fn tokenizer(root: &Path) -> Result<Tokenizer> {
+    let failed =
+        |e: &dyn std::fmt::Display| Error::model(format!("tokenizer in {}: {e}", root.display()));
     let path = root.join("tokenizer.json");
     if path.exists() {
-        return Tokenizer::from_file(path).map_err(|e| anyhow::anyhow!("tokenizer: {e}"));
+        return Tokenizer::from_file(path).map_err(|e| failed(&e));
     }
-    let bpe = BPE::from_file(
-        root.join("vocab.json")
+    let utf8 = |name: &str| {
+        root.join(name)
             .to_str()
-            .context("invalid tokenizer path")?,
-        root.join("merges.txt")
-            .to_str()
-            .context("invalid tokenizer path")?,
-    )
-    .build()
-    .map_err(|e| anyhow::anyhow!("BPE: {e}"))?;
+            .map(str::to_owned)
+            .ok_or_else(|| failed(&"path is not UTF-8"))
+    };
+    let bpe = BPE::from_file(&utf8("vocab.json")?, &utf8("merges.txt")?)
+        .build()
+        .map_err(|e| failed(&e))?;
     let mut tok = Tokenizer::new(bpe);
     let pattern = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
     let split = Split::new(
@@ -33,36 +34,35 @@ pub(super) fn tokenizer(root: &Path) -> Result<Tokenizer> {
         SplitDelimiterBehavior::Isolated,
         false,
     )
-    .map_err(|e| anyhow::anyhow!("tokenizer split: {e}"))?;
+    .map_err(|e| failed(&e))?;
     tok.with_pre_tokenizer(Some(Sequence::new(vec![
         split.into(),
         ByteLevel::new(false, true, false).into(),
     ])));
     tok.with_decoder(Some(ByteDecoder::default()));
-    let config: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("tokenizer_config.json"))?)?;
+    let path = root.join("tokenizer_config.json");
+    let bytes = std::fs::read(&path).map_err(Error::io(&path))?;
+    let config: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| failed(&e))?;
     let mut added = config["added_tokens_decoder"]
         .as_object()
-        .context("missing added tokens")?
+        .ok_or_else(|| failed(&"missing added tokens"))?
         .iter()
         .map(|(id, token)| {
-            Ok((
-                id.parse::<u32>()?,
-                token["content"]
-                    .as_str()
-                    .context("missing added token content")?
-                    .to_owned(),
+            Some((
+                id.parse::<u32>().ok()?,
+                token["content"].as_str()?.to_owned(),
                 token["special"].as_bool().unwrap_or(false),
             ))
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| failed(&"invalid added token"))?;
     added.sort_by_key(|(id, _, _)| *id);
     for (id, content, special) in added {
         tok.add_tokens([AddedToken::from(content.clone(), special)])
-            .map_err(|e| anyhow::anyhow!("added token: {e}"))?;
+            .map_err(|e| failed(&e))?;
         ensure!(
             tok.token_to_id(&content) == Some(id),
-            "token ID mismatch for {content}"
+            failed(&format!("token ID mismatch for {content}"))
         );
     }
     Ok(tok)
@@ -71,7 +71,7 @@ pub(super) fn tokenizer(root: &Path) -> Result<Tokenizer> {
 pub(super) fn encode(tok: &Tokenizer, text: &str) -> Result<Vec<u32>> {
     Ok(tok
         .encode(text, false)
-        .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?
+        .map_err(Error::model)?
         .get_ids()
         .to_vec())
 }
@@ -113,7 +113,7 @@ pub(super) fn language_name(language: &str) -> Result<String> {
             return Ok(name.into());
         }
     }
-    bail!("unsupported language: {language}")
+    Err(Error::Language(language.into()))
 }
 
 pub(super) fn parse_output(raw: &str, forced: Option<&str>) -> Result<(String, String)> {
@@ -122,10 +122,10 @@ pub(super) fn parse_output(raw: &str, forced: Option<&str>) -> Result<(String, S
     }
     let (header, text) = raw
         .split_once("<asr_text>")
-        .context("Qwen3 output has no <asr_text> separator")?;
+        .ok_or_else(|| Error::model("output has no <asr_text> separator"))?;
     let language = header
         .strip_prefix("language ")
-        .context("Qwen3 output has no language header")?;
+        .ok_or_else(|| Error::model("output has no language header"))?;
     if language.trim() == "None" {
         return Ok((text.trim().into(), "None".into()));
     }

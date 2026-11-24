@@ -1,8 +1,7 @@
 use crate::{
-    AudioSource, ModelInfo, Segment, TranscribeOptions, Transcript, TranscriptSummary,
-    audio::duration_ms,
+    AudioSource, BoxError, Error, ModelInfo, Result, Segment, TranscribeOptions, Transcript,
+    TranscriptSummary, audio::duration_ms, error::ensure,
 };
-use anyhow::{Result, bail, ensure};
 use std::collections::BTreeMap;
 
 /// The extension point for model families. No Qwen types appear in this contract.
@@ -13,11 +12,12 @@ pub trait AsrModel: Send {
     /// Recognize a source of mono 16 kHz samples and pass each segment to
     /// `emit` in source order. Segment and word times are milliseconds on the
     /// source timeline. Backends must honor supported options, check
-    /// `options.cancellation` during inference, and return [`crate::Cancelled`]
-    /// instead of partial success.
+    /// `options.cancellation` during inference, and return
+    /// [`Error::Cancelled`] instead of partial success.
     ///
     /// # Errors
-    /// Returns source, inference and sink errors.
+    /// Returns source, inference and sink errors. An error from `emit` must be
+    /// returned unchanged.
     fn transcribe(
         &mut self,
         audio: &mut dyn AudioSource,
@@ -44,10 +44,10 @@ impl AsrEngine {
     /// Returns an error if the ID is empty or already registered.
     pub fn register(&mut self, model: impl AsrModel + 'static) -> Result<()> {
         let id = model.info().id;
-        ensure!(!id.is_empty(), "model ID is empty");
+        ensure!(!id.is_empty(), Error::invalid("model ID is empty"));
         ensure!(
             !self.models.contains_key(&id),
-            "model already registered: {id}"
+            Error::invalid(format!("model already registered: {id}"))
         );
         self.models.insert(id, Box::new(model));
         Ok(())
@@ -61,9 +61,9 @@ impl AsrEngine {
     /// Recognize mono 16 kHz samples held in memory, keeping every segment.
     ///
     /// # Errors
-    /// Rejects invalid options, empty or invalid samples, cancellation and an
-    /// unregistered model ID, and propagates backend failures. Cancellation is
-    /// [`crate::Cancelled`].
+    /// Returns [`Error::UnknownModel`] for an unregistered model ID,
+    /// [`Error::Invalid`] for invalid options and empty or invalid samples,
+    /// [`Error::Cancelled`] on cancellation, and backend failures.
     pub fn transcribe(
         &mut self,
         model: &str,
@@ -91,20 +91,20 @@ impl AsrEngine {
     /// bytes per 30 seconds of speech.
     ///
     /// # Errors
-    /// Rejects an empty source and an unregistered model ID, and propagates
-    /// source, inference and sink errors.
+    /// Returns the errors of [`Self::transcribe`], [`Error::Audio`] when the
+    /// source fails to read and [`Error::Sink`] when `emit` fails.
     pub fn transcribe_source(
         &mut self,
         model: &str,
         audio: &mut dyn AudioSource,
         options: &TranscribeOptions,
-        emit: &mut dyn FnMut(Segment) -> Result<()>,
+        emit: &mut dyn FnMut(Segment) -> Result<(), BoxError>,
     ) -> Result<TranscriptSummary> {
         options.validate()?;
         let Some(backend) = self.models.get_mut(model) else {
-            bail!("model is not registered: {model}")
+            return Err(Error::UnknownModel(model.into()));
         };
-        ensure!(audio.samples() > 0, "audio is empty");
+        ensure!(audio.samples() > 0, Error::invalid("audio is empty"));
         let duration_ms = duration_ms(audio.samples());
         let mut summary = SummaryBuilder::new(model.to_owned(), duration_ms);
         let mut previous_end = 0;
@@ -114,7 +114,7 @@ impl AsrEngine {
                 previous_end <= segment.start_ms
                     && segment.start_ms <= segment.end_ms
                     && segment.end_ms <= duration_ms,
-                "backend segment out of order or outside the audio"
+                Error::model("backend segment out of order or outside the audio")
             );
             ensure!(
                 segment
@@ -123,11 +123,11 @@ impl AsrEngine {
                     .all(|word| segment.start_ms <= word.start_ms
                         && word.start_ms <= word.end_ms
                         && word.end_ms <= segment.end_ms),
-                "backend word outside its segment"
+                Error::model("backend word outside its segment")
             );
             previous_end = segment.end_ms;
             summary.observe(&segment);
-            emit(segment)?;
+            emit(segment).map_err(Error::Sink)?;
             options.cancellation.check()?;
             Ok(())
         })?;
