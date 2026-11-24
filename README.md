@@ -101,7 +101,7 @@ RF64 and compressed media are not decoded here.
 
 ```toml
 [dependencies]
-valle-asr = { version = "0.2.0", default-features = false, features = ["qwen3", "download"] }
+valle-asr = { version = "0.3.0", default-features = false, features = ["qwen3", "download"] }
 ```
 
 Model weights are downloaded separately and are not embedded in the crate.
@@ -300,7 +300,7 @@ cargo package --locked --list
 cargo publish --locked --dry-run
 ```
 
-The current release is version 0.2.0. Breaking public API changes require a minor
+The current release is version 0.3.0. Breaking public API changes require a minor
 version increment before 1.0; compatible fixes use a patch increment. Document
 changes in the release notes and tag each published version. The minimum Rust
 version is declared in `Cargo.toml` and matches the toolchain used in CI.
@@ -316,6 +316,23 @@ passed at that exact commit. The workflow uses the repository secret
 SHA-256 against crates.io. Re-running an identical published archive is safe;
 an existing version with different contents is rejected. Manual dispatch can
 validate an existing tag with `publish: false` before uploading it.
+
+## 0.3.0 release notes
+
+- The library takes mono 16 kHz f32 samples through `AudioSource`, a slice or
+  any source that reads from an offset. `AsrEngine::transcribe` takes a slice;
+  `transcribe_source` streams segments from any source to a sink. Reading WAV
+  and writing JSON moved into the CLI, and `Audio`, `WavChunks`, `AudioChunk`
+  and `JsonTranscriptWriter` left the public API.
+- `AsrModel` has a single streaming `transcribe` method.
+- In-memory samples are cut at pauses near the chunk limit, as files were.
+- Errors are the `valle_asr::Error` enum; `Cancelled` is one of its variants.
+  anyhow is no longer a dependency.
+- Downloads use ureq and ring, the per-revision lock uses the standard library,
+  and the mel spectrum is a matrix product. A default build on macOS arm64
+  depends on 165 crates, down from 225.
+- Attention shares key/value heads across query groups without copying them.
+- The output of the CLI is unchanged.
 
 ## 0.2.0 release notes
 
