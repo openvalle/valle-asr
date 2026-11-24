@@ -2,8 +2,6 @@
 use crate::CancellationToken;
 use anyhow::Result;
 use candle_core::{Device, Tensor};
-use rustfft::{FftPlanner, num_complex::Complex};
-
 pub(super) fn mel(samples: &[f32], cancellation: &CancellationToken) -> Result<Tensor> {
     cancellation.check()?;
     const FFT: usize = 400;
@@ -15,17 +13,13 @@ pub(super) fn mel(samples: &[f32], cancellation: &CancellationToken) -> Result<T
     signal.resize(length, 0.0);
     let frames = length / HOP;
     let frequencies = FFT / 2 + 1;
-    let filters = filters(BINS, frequencies);
     let window: Vec<_> = (0..FFT)
         .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / FFT as f32).cos())
         .collect();
-    let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT);
-    let mut scratch = vec![Complex::default(); fft.get_inplace_scratch_len()];
-    let mut buffer = vec![Complex::default(); FFT];
-    let mut values = vec![0.0f32; BINS * frames];
+    let mut windowed = Vec::with_capacity(frames * FFT);
     for frame in 0..frames {
         cancellation.check()?;
-        for (i, b) in buffer.iter_mut().enumerate() {
+        windowed.extend(window.iter().enumerate().map(|(i, w)| {
             let index = frame as isize * HOP as isize + i as isize - (FFT / 2) as isize;
             let reflected = if index < 0 {
                 -index
@@ -34,21 +28,37 @@ pub(super) fn mel(samples: &[f32], cancellation: &CancellationToken) -> Result<T
             } else {
                 index
             };
-            *b = Complex::new(signal[reflected as usize] * window[i], 0.0);
+            signal[reflected as usize] * w
+        }));
+    }
+    // A 400-point real DFT as one matrix product: each frame against the
+    // cosine and sine of every frequency bin. It runs on the same matrix
+    // kernels as the network, so no FFT library is needed.
+    let mut basis = vec![0.0f32; FFT * 2 * frequencies];
+    for n in 0..FFT {
+        for k in 0..frequencies {
+            let phase = 2.0 * std::f64::consts::PI * ((n * k) % FFT) as f64 / FFT as f64;
+            basis[n * 2 * frequencies + k] = phase.cos() as f32;
+            basis[n * 2 * frequencies + frequencies + k] = phase.sin() as f32;
         }
-        fft.process_with_scratch(&mut buffer, &mut scratch);
-        // The spectrum is no longer needed after its power is computed. Reuse
-        // its real slots instead of recomputing power for every mel channel.
-        for bin in &mut buffer[..frequencies] {
-            bin.re = bin.norm_sqr();
-        }
-        for m in 0..BINS {
-            values[m * frames + frame] = (0..frequencies)
-                .map(|f| filters[m * frequencies + f] * buffer[f].re)
-                .sum::<f32>()
-                .max(1e-10)
-                .log10();
-        }
+    }
+    let spectrum = Tensor::from_vec(windowed, (frames, FFT), &Device::Cpu)?.matmul(
+        &Tensor::from_vec(basis, (FFT, 2 * frequencies), &Device::Cpu)?,
+    )?;
+    cancellation.check()?;
+    let power = (spectrum.narrow(1, 0, frequencies)?.sqr()?
+        + spectrum.narrow(1, frequencies, frequencies)?.sqr()?)?;
+    let filters = Tensor::from_vec(
+        filters(BINS, frequencies),
+        (BINS, frequencies),
+        &Device::Cpu,
+    )?;
+    let mut values = filters
+        .matmul(&power.t()?)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    for v in &mut values {
+        *v = v.max(1e-10).log10();
     }
     let floor = values.iter().copied().fold(f32::NEG_INFINITY, f32::max) - 8.0;
     for v in &mut values {
