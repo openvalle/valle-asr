@@ -116,7 +116,7 @@ RF64 and compressed media are not decoded here.
 
 ```toml
 [dependencies]
-valle-asr = { version = "0.3.0", default-features = false, features = ["qwen3"] }
+valle-asr = { version = "0.3.1", default-features = false, features = ["qwen3"] }
 ```
 
 The library reads models from local directories and never uses the network.
@@ -322,7 +322,7 @@ cargo package --locked --list
 cargo publish --locked --dry-run
 ```
 
-The current release is version 0.3.0. Breaking public API changes require a minor
+The current release is version 0.3.1. Breaking public API changes require a minor
 version increment before 1.0; compatible fixes use a patch increment. Document
 changes in the release notes and tag each published version. The minimum Rust
 version is declared in `Cargo.toml` and matches the toolchain used in CI.
@@ -338,6 +338,21 @@ passed at that exact commit. The workflow uses the repository secret
 SHA-256 against crates.io. Re-running an identical published archive is safe;
 an existing version with different contents is rejected. Manual dispatch can
 validate an existing tag with `publish: false` before uploading it.
+
+## 0.3.1 release notes
+
+- The `metal` feature runs Qwen3 on the macOS GPU with the checkpoint's BF16
+  weights. On an M2 Pro, a 166 s Chinese narration with word timestamps takes
+  about 17 s and peaks at 2.8 GB, against about 60 s and 4.9 GB on CPU. Text
+  differs from CPU only in an occasional punctuation mark or a homophone such
+  as 的 for 地; word timestamps agree within one 80 ms step. It is off by
+  default, and the macOS arm64 workflow runs the real-model test with it.
+- On Metal, attention uses Candle's fused kernel, and weights are read from
+  the file with positioned reads instead of page faults on a mapping. Loading
+  a model onto the GPU takes about 1 s.
+- `transcribe` in the CLI checks a cached model's size only; `download`
+  re-hashes cached files. A run no longer spends about 1.8 s hashing 3.6 GB.
+- CPU builds and the library API are unchanged.
 
 ## 0.3.0 release notes
 
