@@ -135,7 +135,9 @@ impl Encoder {
             norm: layer_norm(c.d_model, 1e-5, vb.pp("ln_post"))?,
             proj1: linear(c.d_model, c.d_model, vb.pp("proj1"))?,
             proj2: linear(c.d_model, c.output_dim, vb.pp("proj2"))?,
-            positions: Tensor::from_vec(data, (c.max_source_positions, c.d_model), &Device::Cpu)?,
+            positions: Tensor::from_vec(data, (c.max_source_positions, c.d_model), &Device::Cpu)?
+                .to_dtype(vb.dtype())?
+                .to_device(vb.device())?,
             window_frames: c.n_window_infer,
         })
     }
@@ -151,7 +153,7 @@ impl Encoder {
             for chunk in (start..end).step_by(100) {
                 let count = (end - chunk).min(100);
                 let part = mel.narrow(1, chunk, count)?;
-                let pad = Tensor::zeros((128, 100 - count), DType::F32, &Device::Cpu)?;
+                let pad = Tensor::zeros((128, 100 - count), mel.dtype(), mel.device())?;
                 let mut x = Tensor::cat(&[part, pad], 1)?.unsqueeze(0)?.unsqueeze(0)?;
                 for conv in &self.conv {
                     cancellation.check()?;
@@ -311,7 +313,12 @@ impl Network {
         } else {
             vec![root.join("model.safetensors")]
         };
-        let vb = super::weights::load(&paths, cancellation)?;
+        // On the GPU the checkpoint's BF16 weights are used as stored.
+        #[cfg(feature = "metal")]
+        let (dtype, device) = (DType::BF16, Device::new_metal(0)?);
+        #[cfg(not(feature = "metal"))]
+        let (dtype, device) = (DType::F32, Device::Cpu);
+        let vb = super::weights::load(&paths, dtype, &device, cancellation)?;
         let t = &config.thinker_config.text_config;
         let text = vb.pp("thinker.model");
         let embedding = text.get((t.vocab_size, t.hidden_size), "embed_tokens.weight")?;
@@ -342,13 +349,16 @@ impl Network {
         })
     }
     pub fn audio(&self, samples: &[f32], cancellation: &CancellationToken) -> Result<Tensor> {
-        self.encoder
-            .forward(&super::dsp::mel(samples, cancellation)?, cancellation)
+        // The mel spectrum is computed on the CPU in F32.
+        let mel = super::dsp::mel(samples, cancellation)?
+            .to_dtype(self.embedding.dtype())?
+            .to_device(self.embedding.device())?;
+        self.encoder.forward(&mel, cancellation)
     }
     pub fn embed(&self, ids: &[u32]) -> Result<Tensor> {
         Ok(self
             .embedding
-            .index_select(&Tensor::new(ids, &Device::Cpu)?, 0)?
+            .index_select(&Tensor::new(ids, self.embedding.device())?, 0)?
             .unsqueeze(0)?)
     }
     pub fn cache(&self) -> Cache {
@@ -382,7 +392,7 @@ impl Network {
     ) -> Result<Tensor> {
         let h = self.forward_hidden(x, 0, None, cancellation)?;
         cancellation.check()?;
-        let h = h.index_select(&Tensor::new(positions, &Device::Cpu)?, 1)?;
+        let h = h.index_select(&Tensor::new(positions, h.device())?, 1)?;
         Ok(self.head.forward(&self.norm.forward(&h)?)?)
     }
 
@@ -415,8 +425,9 @@ impl Network {
             }
         }
         let shape = (1, 1, seq, t.head_dim);
-        let cos = Tensor::from_vec(cos, shape, &Device::Cpu)?;
-        let sin = Tensor::from_vec(sin, shape, &Device::Cpu)?;
+        let on_device = |t: Tensor| t.to_dtype(x.dtype())?.to_device(x.device());
+        let cos = on_device(Tensor::from_vec(cos, shape, &Device::Cpu)?)?;
+        let sin = on_device(Tensor::from_vec(sin, shape, &Device::Cpu)?)?;
         let mask = if seq > 1 {
             let total = seq + offset;
             let mut data = Vec::with_capacity(seq * total);
@@ -430,7 +441,11 @@ impl Network {
                     }
                 }));
             }
-            Some(Tensor::from_vec(data, (1, 1, seq, total), &Device::Cpu)?)
+            Some(on_device(Tensor::from_vec(
+                data,
+                (1, 1, seq, total),
+                &Device::Cpu,
+            )?)?)
         } else {
             None
         };

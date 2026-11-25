@@ -216,8 +216,14 @@ promised, and no extra polling thread is created by the library.
 - `qwen3`: the built-in Qwen3 CPU backend.
 - `cli`: the command-line application with its WAV reader, JSON output and
   model downloader, including `qwen3`.
+- `metal`: run Qwen3 on the macOS GPU, including `qwen3`. Weights stay in
+  the checkpoint's BF16; on CPU they are F32. On an M2 Pro, a 166 s Chinese
+  narration with word timestamps takes about 17 s and peaks at 2.8 GB of RAM,
+  against about 60 s and 4.9 GB on CPU. Text is the same apart from an
+  occasional punctuation mark or a homophone such as 的 for 地, and word
+  timestamps agree within one 80 ms step.
 
-Both are enabled by default. The model-independent core can be used with
+`qwen3` and `cli` are enabled by default. The model-independent core can be used with
 `default-features = false` and no additional features.
 
 ## CLI model cache
