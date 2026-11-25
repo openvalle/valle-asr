@@ -23,6 +23,9 @@ struct CpuWeights {
     cancellation: CancellationToken,
     shards: Vec<Shard>,
     weights: HashMap<String, Weight>,
+    /// One buffer for reading every GPU tensor, sized by the largest.
+    #[cfg(feature = "metal")]
+    scratch: std::sync::Mutex<Vec<u8>>,
 }
 
 impl CpuWeights {
@@ -42,6 +45,29 @@ impl CpuWeights {
             return Tensor::zeros(info.shape.clone(), dtype, device);
         }
         let shard = &self.shards[info.shard];
+        #[cfg(feature = "metal")]
+        if device.is_metal() {
+            use std::os::unix::fs::FileExt;
+            // A GPU tensor copies the bytes into its own buffer anyway. Reading
+            // them into a short-lived buffer is several times faster than
+            // faulting a mapping in page by page.
+            let mut scratch = self
+                .scratch
+                .lock()
+                .map_err(|_| Error::msg("weight buffer"))?;
+            scratch.resize(info.bytes, 0);
+            shard
+                .file
+                .read_exact_at(&mut scratch, info.offset)
+                .map_err(|e| Error::from(e).with_path(&shard.path))?;
+            return Tensor::from_raw_buffer(
+                &scratch,
+                DType::try_from(info.dtype)?,
+                info.shape.dims(),
+                device,
+            )?
+            .to_dtype(dtype);
+        }
         // SAFETY: the immutable file handle is the same one whose complete
         // safetensors metadata was validated. Map only this tensor's bytes;
         // dropping this window releases its resident mapping after conversion.
@@ -127,6 +153,8 @@ pub(super) fn load(
         cancellation: cancellation.clone(),
         shards: Vec::new(),
         weights: HashMap::new(),
+        #[cfg(feature = "metal")]
+        scratch: std::sync::Mutex::new(Vec::new()),
     };
     for path in paths {
         cancellation.check().map_err(Error::wrap)?;
