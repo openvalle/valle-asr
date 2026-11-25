@@ -17,6 +17,21 @@ mod tests;
 /// group of query heads attends to its shared key/value head without copying it.
 fn attention(q: &Tensor, k: &Tensor, v: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
     let (b, heads, s, d) = q.dims4()?;
+    // Metal has a fused kernel. The only mask here is causal, aligned to the
+    // end of the keys, which is how the kernel applies its own causal mask.
+    #[cfg(feature = "metal")]
+    if q.device().is_metal() {
+        let scale = 1.0 / (d as f32).sqrt();
+        return Ok(candle_nn::ops::sdpa(
+            q,
+            k,
+            v,
+            None,
+            mask.is_some(),
+            scale,
+            1.0,
+        )?);
+    }
     let kv_heads = k.dim(1)?;
     let groups = heads / kv_heads;
     let q = q.reshape((b, kv_heads, groups * s, d))?;
