@@ -106,7 +106,8 @@ fn run(cli: Cli) -> Result<()> {
         } => {
             let cache = cache(cache_dir)?;
             for id in [&model, "qwen3-forced-aligner-0.6b"] {
-                let path = cache.ensure(&builtin_model(id)?, offline)?;
+                // An explicit download re-hashes cached files as well.
+                let path = cache.ensure(&builtin_model(id)?, offline, true)?;
                 println!("{}", path.display());
             }
         }
@@ -138,15 +139,18 @@ fn run(cli: Cli) -> Result<()> {
                     let cache = cache(cache_dir)?;
                     let asr = match model_dir {
                         Some(p) => p,
-                        None => cache.ensure(&builtin_model(&model)?, offline)?,
+                        None => cache.ensure(&builtin_model(&model)?, offline, false)?,
                     };
                     let aligner = if text_only {
                         None
                     } else {
                         Some(match aligner_dir {
                             Some(p) => p,
-                            None => cache
-                                .ensure(&builtin_model("qwen3-forced-aligner-0.6b")?, offline)?,
+                            None => cache.ensure(
+                                &builtin_model("qwen3-forced-aligner-0.6b")?,
+                                offline,
+                                false,
+                            )?,
                         })
                     };
                     (asr, aligner)

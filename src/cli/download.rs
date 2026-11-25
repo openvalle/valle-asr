@@ -41,11 +41,13 @@ impl ModelCache {
         )
         .join(".cache/valle-asr/models"))
     }
-    /// Validate every file even on a cache hit. Offline never uses corrupt or
-    /// incomplete artifacts. Per-revision file locks serialize concurrent writers.
-    /// Even offline calls create the revision directory and writer lock, so
-    /// the cache root must be writable.
-    pub fn ensure(&self, spec: &ModelSpec, offline: bool) -> Result<PathBuf> {
+    /// Return the revision directory, downloading files that are missing or
+    /// have the wrong size. A download is hashed before it gets its final name,
+    /// so a cache hit checks sizes only; `rehash` also hashes every cached file.
+    /// Offline never uses incomplete artifacts. Per-revision file locks
+    /// serialize concurrent writers. Even offline calls create the revision
+    /// directory and writer lock, so the cache root must be writable.
+    pub fn ensure(&self, spec: &ModelSpec, offline: bool, rehash: bool) -> Result<PathBuf> {
         validate_component(&spec.id)?;
         validate_component(&spec.revision)?;
         let root = self.root.join(&spec.id).join(&spec.revision);
@@ -61,7 +63,7 @@ impl ModelCache {
         for file in &spec.files {
             validate_component(&file.path)?;
             let path = root.join(&file.path);
-            if verify(&path, file)? {
+            if verify(&path, file, rehash)? {
                 continue;
             }
             ensure!(
@@ -116,7 +118,7 @@ fn validate_component(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn verify(path: &Path, file: &ModelFile) -> Result<bool> {
+fn verify(path: &Path, file: &ModelFile, rehash: bool) -> Result<bool> {
     let mut input = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -124,6 +126,9 @@ fn verify(path: &Path, file: &ModelFile) -> Result<bool> {
     };
     if input.metadata()?.len() != file.bytes {
         return Ok(false);
+    }
+    if !rehash {
+        return Ok(true);
     }
     let mut hash = Sha256::new(&SHA256);
     let mut buffer = vec![0; 1024 * 1024];
@@ -205,14 +210,18 @@ mod tests {
                 sha256: hex(ring::digest::digest(&SHA256, b"abc").as_ref()),
             }],
         };
-        assert!(cache.ensure(&spec, true).is_err());
+        assert!(cache.ensure(&spec, true, false).is_err());
         let folder = temp.path().join("test/abc");
         fs::write(folder.join("weights.bin.part"), b"abc").unwrap();
-        assert!(cache.ensure(&spec, true).is_err());
+        assert!(cache.ensure(&spec, true, false).is_err());
+        fs::write(folder.join("weights.bin"), b"ab").unwrap();
+        assert!(cache.ensure(&spec, true, false).is_err());
+        // Same size, wrong content: only a rehash notices.
         fs::write(folder.join("weights.bin"), b"xyz").unwrap();
-        assert!(cache.ensure(&spec, true).is_err());
+        assert_eq!(cache.ensure(&spec, true, false).unwrap(), folder);
+        assert!(cache.ensure(&spec, true, true).is_err());
         fs::write(folder.join("weights.bin"), b"abc").unwrap();
-        assert_eq!(cache.ensure(&spec, true).unwrap(), folder);
+        assert_eq!(cache.ensure(&spec, true, true).unwrap(), folder);
     }
     #[test]
     fn prevents_cache_path_traversal() {

@@ -226,9 +226,10 @@ The CLI's downloader serves development and CI; it fetches from Hugging Face
 only, without resuming an interrupted file. Applications should fetch models
 themselves. The CLI's cache defaults to `VALLE_ASR_CACHE` when set, otherwise
 to the native user cache directory. `--cache-dir` overrides it. Every revision has its own
-directory and cross-process writer lock. Existing files are reused only after
-size and SHA-256 validation; interrupted `.part` files are never treated as
-models. Downloads are verified before a final rename. Revisions are immutable
+directory and cross-process writer lock. Downloads are verified by size and
+SHA-256 before a final rename, so `transcribe` reuses a cached file after
+checking only its size; `download` also re-hashes every cached file.
+Interrupted `.part` files are never treated as models. Revisions are immutable
 while model files are mapped. Do not modify a directory being used for inference.
 
 GitHub Actions caches Cargo dependencies/builds per OS and CPU architecture
