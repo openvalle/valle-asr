@@ -270,8 +270,9 @@ it validates file handling, bounded chunks and global word offsets, not two
 hours of continuous-speech accuracy or throughput.
 Each platform uploads the output JSON and a timing/accuracy receipt. They
 validate correctness on hosted CPUs; performance and Windows hardware
-compatibility still need real-machine testing. GPU acceleration is not
-validated in this CPU matrix.
+compatibility still need real-machine testing. The macOS arm64 workflow
+runs the same real-model test a second time with the `metal` feature on the
+runner's GPU and uploads both receipts.
 
 ```sh
 cargo fmt --all -- --check

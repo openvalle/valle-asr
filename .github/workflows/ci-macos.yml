@@ -78,12 +78,22 @@ jobs:
         run: cargo run --locked --release -- download --cache-dir models
       - name: Real English, Chinese, long files and word alignment
         run: cargo test --locked --release --test real_models -- --ignored --nocapture
+      - name: Keep the CPU validation receipt
+        run: mv artifacts artifacts-cpu
+      - name: Real models on the Metal GPU with BF16 weights
+        run: cargo test --locked --release --features metal --test real_models -- --ignored --nocapture
+      - name: Collect CPU and Metal results
+        if: always()
+        run: |
+          mkdir -p results
+          if [ -d artifacts-cpu ]; then mv artifacts-cpu results/cpu; fi
+          if [ -d artifacts ]; then mv artifacts results/metal; fi
       - name: Upload recognition results and validation receipt
         if: always()
         uses: actions/upload-artifact@v7.0.2
         with:
           name: macos-arm64-qwen3-results
-          path: artifacts/
+          path: results/
           if-no-files-found: warn
           retention-days: 14
       - name: Exclude package staging from the build cache

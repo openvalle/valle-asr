@@ -40,7 +40,8 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        # metal builds Apple's frameworks, so it is linted on macOS only.
+        run: cargo clippy --locked --all-targets --features cli -- -D warnings
       - name: Check optional backend boundary
         run: cargo test --locked --no-default-features
       - name: Feature combinations
